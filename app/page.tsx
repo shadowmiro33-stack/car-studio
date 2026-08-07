@@ -42,7 +42,7 @@ function roundedRect(
 }
 
 type SubjectBounds = { x: number; y: number; width: number; height: number };
-type ContactRegion = { x: number; y: number; width: number };
+type BottomPoint = { x: number; y: number };
 
 function getSubjectBounds(image: HTMLImageElement): SubjectBounds {
   const analysisSize = 720;
@@ -83,7 +83,7 @@ function getSubjectBounds(image: HTMLImageElement): SubjectBounds {
   };
 }
 
-function getContactRegions(image: HTMLImageElement, bounds: SubjectBounds): ContactRegion[] {
+function getBottomProfile(image: HTMLImageElement, bounds: SubjectBounds): BottomPoint[] {
   const analysisWidth = Math.min(900, Math.max(360, Math.round(bounds.width)));
   const analysisHeight = Math.max(1, Math.round(analysisWidth * (bounds.height / bounds.width)));
   const canvas = document.createElement("canvas");
@@ -93,62 +93,23 @@ function getContactRegions(image: HTMLImageElement, bounds: SubjectBounds): Cont
   if (!context) return [];
   context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, analysisWidth, analysisHeight);
   const pixels = context.getImageData(0, 0, analysisWidth, analysisHeight).data;
-  const candidates: Array<{ x: number; y: number } | null> = [];
-
-  for (let x = 0; x < analysisWidth; x += 1) {
+  const points: BottomPoint[] = [];
+  const step = Math.max(2, Math.round(analysisWidth / 220));
+  for (let x = 0; x < analysisWidth; x += step) {
     let bottom = -1;
-    for (let y = analysisHeight - 1; y >= Math.round(analysisHeight * 0.58); y -= 1) {
-      if (pixels[(y * analysisWidth + x) * 4 + 3] > 72) {
-        bottom = y;
-        break;
+    for (let sampleX = Math.max(0, x - step); sampleX <= Math.min(analysisWidth - 1, x + step); sampleX += 1) {
+      for (let y = analysisHeight - 1; y >= Math.round(analysisHeight * 0.58); y -= 1) {
+        if (pixels[(y * analysisWidth + sampleX) * 4 + 3] > 56) {
+          bottom = Math.max(bottom, y);
+          break;
+        }
       }
     }
-    if (bottom < analysisHeight * 0.84) {
-      candidates.push(null);
-      continue;
+    if (bottom >= analysisHeight * 0.7) {
+      points.push({ x: x / analysisWidth, y: bottom / analysisHeight });
     }
-    let darkSamples = 0;
-    for (let sample = 2; sample <= 10; sample += 2) {
-      const y = Math.max(0, bottom - sample);
-      const offset = (y * analysisWidth + x) * 4;
-      const luminance = pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722;
-      if (pixels[offset + 3] > 96 && luminance < 108) darkSamples += 1;
-    }
-    candidates.push(darkSamples >= 2 ? { x, y: bottom } : null);
   }
-
-  const groups: ContactRegion[] = [];
-  let start = -1;
-  let yTotal = 0;
-  let count = 0;
-  for (let x = 0; x <= candidates.length; x += 1) {
-    const candidate = candidates[x] ?? null;
-    if (candidate) {
-      if (start < 0) start = x;
-      yTotal += candidate.y;
-      count += 1;
-      continue;
-    }
-    if (start >= 0 && count > 0) {
-      const regionWidth = x - start;
-      const normalizedWidth = regionWidth / analysisWidth;
-      if (normalizedWidth >= 0.018 && normalizedWidth <= 0.22) {
-        groups.push({
-          x: (start + regionWidth / 2) / analysisWidth,
-          y: yTotal / count / analysisHeight,
-          width: normalizedWidth,
-        });
-      }
-    }
-    start = -1;
-    yTotal = 0;
-    count = 0;
-  }
-
-  return groups
-    .sort((a, b) => (b.y + b.width * 0.3) - (a.y + a.width * 0.3))
-    .slice(0, 4)
-    .sort((a, b) => a.x - b.x);
+  return points;
 }
 
 async function refineCutout(blob: Blob): Promise<Blob> {
@@ -367,7 +328,7 @@ export default function Home() {
     const drawX = (width - drawWidth) / 2;
     const floorY = height * (backdrop === "blue" ? 0.855 : 0.85);
     const drawY = floorY - drawHeight;
-    const contactRegions = getContactRegions(image, bounds);
+    const bottomProfile = getBottomProfile(image, bounds);
 
     context.save();
     context.filter = `blur(${Math.max(7, width * 0.005)}px)`;
@@ -375,9 +336,9 @@ export default function Home() {
     context.beginPath();
     context.ellipse(
       drawX + drawWidth * 0.5,
-      floorY - drawHeight * 0.018,
-      drawWidth * 0.39,
-      height * 0.016,
+      floorY - drawHeight * 0.012,
+      drawWidth * 0.37,
+      height * 0.013,
       0,
       0,
       Math.PI * 2,
@@ -385,21 +346,23 @@ export default function Home() {
     context.fill();
     context.restore();
 
-    const contacts = contactRegions.length > 0
-      ? contactRegions
-      : [
-          { x: 0.28, y: 0.985, width: 0.09 },
-          { x: 0.73, y: 0.985, width: 0.09 },
-        ];
-    for (const contact of contacts) {
-      const contactX = drawX + drawWidth * contact.x;
-      const contactY = drawY + drawHeight * Math.min(0.995, contact.y);
-      const radiusX = Math.max(drawWidth * 0.026, drawWidth * contact.width * 0.48);
+    if (bottomProfile.length > 1) {
+      const first = bottomProfile[0];
       context.save();
-      context.filter = `blur(${Math.max(2.5, width * 0.0018)}px)`;
-      context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.76)" : "rgba(13,16,18,.58)";
+      context.filter = `blur(${Math.max(2, width * 0.0014)}px)`;
+      context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.66)" : "rgba(12,15,17,.46)";
       context.beginPath();
-      context.ellipse(contactX, contactY, radiusX, Math.max(3, height * 0.006), 0, 0, Math.PI * 2);
+      context.moveTo(drawX + drawWidth * first.x, drawY + drawHeight * first.y);
+      for (const point of bottomProfile.slice(1)) {
+        context.lineTo(drawX + drawWidth * point.x, drawY + drawHeight * point.y);
+      }
+      for (const point of [...bottomProfile].reverse()) {
+        context.lineTo(
+          drawX + drawWidth * point.x,
+          drawY + drawHeight * point.y + Math.max(5, height * 0.01),
+        );
+      }
+      context.closePath();
       context.fill();
       context.restore();
     }
