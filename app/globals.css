@@ -39,7 +39,7 @@ img { display:block; }
 .backdrops { display:grid; gap:7px; margin-bottom:21px; }
 .backdrops button { border:1px solid #dedfdd; background:#fff; height:42px; padding:5px 8px; display:flex; align-items:center; gap:10px; cursor:pointer; text-align:left; font-size:11px; }
 .backdrops button.active { border-color:#17191b; box-shadow:inset 0 0 0 1px #17191b; font-weight:700; }
-.swatch { width:40px; height:28px; border:1px solid rgba(0,0,0,.06); }.swatch.studio { background:linear-gradient(#fff,#d8d9d7); }.swatch.warm { background:linear-gradient(#f2eee7,#beb4a7); }.swatch.graphite { background:linear-gradient(#55585b,#17191b); }
+.swatch { width:40px; height:28px; border:1px solid rgba(0,0,0,.06); }.swatch.blue { background:linear-gradient(165deg,#f8f9fa 0 38%,#2469f4 39% 56%,#c5cbd0 57% 100%); }.swatch.studio { background:linear-gradient(#fff,#d8d9d7); }.swatch.warm { background:linear-gradient(#f2eee7,#beb4a7); }.swatch.graphite { background:linear-gradient(#55585b,#17191b); }
 .segments { display:grid; grid-template-columns:repeat(4,1fr); margin-bottom:15px; border:1px solid #dcdedb; }
 .segments button { border:0; border-right:1px solid #dcdedb; background:#fff; font-size:10px; height:34px; cursor:pointer; }.segments button:last-child{border-right:0}.segments button.active{background:var(--dark);color:#fff;font-weight:700}
 .plate-button { border:1px solid #dedfdd; background:#fff; min-height:50px; display:flex; gap:12px; align-items:center; padding:9px 12px; text-align:left; cursor:pointer; }

@@ -2,10 +2,11 @@
 
 import { ChangeEvent, DragEvent, MouseEvent, useEffect, useRef, useState } from "react";
 
-type Backdrop = "studio" | "warm" | "graphite";
+type Backdrop = "blue" | "studio" | "warm" | "graphite";
 type Ratio = "original" | "16:9" | "4:3" | "1:1";
 
 const backdropNames: Record<Backdrop, string> = {
+  blue: "블루 커브 스튜디오",
   studio: "화이트 스튜디오",
   warm: "웜그레이 쇼룸",
   graphite: "그래파이트 스튜디오",
@@ -40,12 +41,220 @@ function roundedRect(
   context.roundRect(x, y, width, height, r);
 }
 
+type SubjectBounds = { x: number; y: number; width: number; height: number };
+
+function getSubjectBounds(image: HTMLImageElement): SubjectBounds {
+  const analysisSize = 720;
+  const scale = Math.min(1, analysisSize / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return { x: 0, y: 0, width: image.width, height: image.height };
+  context.drawImage(image, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (pixels[(y * width + x) * 4 + 3] < 36) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  if (maxX < minX || maxY < minY) return { x: 0, y: 0, width: image.width, height: image.height };
+  const padding = 4;
+  minX = Math.max(0, minX - padding);
+  minY = Math.max(0, minY - padding);
+  maxX = Math.min(width - 1, maxX + padding);
+  maxY = Math.min(height - 1, maxY + padding);
+  return {
+    x: Math.round((minX / width) * image.width),
+    y: Math.round((minY / height) * image.height),
+    width: Math.max(1, Math.round(((maxX - minX + 1) / width) * image.width)),
+    height: Math.max(1, Math.round(((maxY - minY + 1) / height) * image.height)),
+  };
+}
+
+async function refineCutout(blob: Blob): Promise<Blob> {
+  const source = URL.createObjectURL(blob);
+  try {
+    const image = await loadImage(source);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return blob;
+    context.drawImage(image, 0, 0);
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const pixels = imageData.data;
+    const original = new Uint8ClampedArray(pixels);
+    const width = canvas.width;
+    const height = canvas.height;
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const offset = (y * width + x) * 4;
+        const alpha = original[offset + 3];
+        if (alpha <= 20) {
+          pixels[offset + 3] = 0;
+          continue;
+        }
+        if (alpha >= 245) continue;
+
+        let solidNeighbors = 0;
+        let bestOffset = offset;
+        let bestAlpha = alpha;
+        for (let dy = -2; dy <= 2; dy += 1) {
+          const sampleY = y + dy;
+          if (sampleY < 0 || sampleY >= height) continue;
+          for (let dx = -2; dx <= 2; dx += 1) {
+            const sampleX = x + dx;
+            if (sampleX < 0 || sampleX >= width) continue;
+            const sampleOffset = (sampleY * width + sampleX) * 4;
+            const sampleAlpha = original[sampleOffset + 3];
+            if (sampleAlpha > 96) solidNeighbors += 1;
+            if (sampleAlpha > bestAlpha) {
+              bestAlpha = sampleAlpha;
+              bestOffset = sampleOffset;
+            }
+          }
+        }
+        if (solidNeighbors < 5) {
+          pixels[offset + 3] = 0;
+          continue;
+        }
+
+        const normalized = Math.max(0, Math.min(1, (alpha - 24) / 216));
+        const smoothAlpha = normalized * normalized * (3 - 2 * normalized);
+        pixels[offset + 3] = Math.round(smoothAlpha * 255);
+        const decontaminate = (1 - smoothAlpha) * Math.min(1, bestAlpha / 220) * 0.72;
+        pixels[offset] = Math.round(original[offset] * (1 - decontaminate) + original[bestOffset] * decontaminate);
+        pixels[offset + 1] = Math.round(original[offset + 1] * (1 - decontaminate) + original[bestOffset + 1] * decontaminate);
+        pixels[offset + 2] = Math.round(original[offset + 2] * (1 - decontaminate) + original[bestOffset + 2] * decontaminate);
+      }
+    }
+
+    context.putImageData(imageData, 0, 0);
+    return await new Promise<Blob>((resolve) => canvas.toBlob((result) => resolve(result ?? blob), "image/png"));
+  } finally {
+    URL.revokeObjectURL(source);
+  }
+}
+
+function drawStudioBackdrop(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  backdrop: Backdrop,
+  brandLogo?: HTMLImageElement,
+) {
+  if (backdrop === "blue") {
+    const wall = context.createLinearGradient(0, 0, 0, height);
+    wall.addColorStop(0, "#f8f9fa");
+    wall.addColorStop(0.58, "#e7eaed");
+    wall.addColorStop(0.7, "#cfd4d8");
+    wall.addColorStop(1, "#aeb5ba");
+    context.fillStyle = wall;
+    context.fillRect(0, 0, width, height);
+
+    const wallGlow = context.createRadialGradient(width * 0.5, height * 0.38, 0, width * 0.5, height * 0.38, width * 0.62);
+    wallGlow.addColorStop(0, "rgba(255,255,255,.98)");
+    wallGlow.addColorStop(0.68, "rgba(255,255,255,.28)");
+    wallGlow.addColorStop(1, "rgba(255,255,255,0)");
+    context.fillStyle = wallGlow;
+    context.fillRect(0, 0, width, height);
+
+    const bandTop = height * 0.105;
+    const bandBottom = height * 0.205;
+    context.save();
+    context.beginPath();
+    context.moveTo(0, bandTop * 0.72);
+    context.quadraticCurveTo(width * 0.5, bandTop * 1.34, width, bandTop * 0.72);
+    context.lineTo(width, bandBottom * 0.86);
+    context.quadraticCurveTo(width * 0.5, bandBottom * 1.12, 0, bandBottom * 0.86);
+    context.closePath();
+    const band = context.createLinearGradient(0, 0, width, 0);
+    band.addColorStop(0, "#1559e8");
+    band.addColorStop(0.5, "#3179ff");
+    band.addColorStop(1, "#1559e8");
+    context.fillStyle = band;
+    context.shadowColor = "rgba(29,100,255,.35)";
+    context.shadowBlur = Math.max(12, height * 0.018);
+    context.fill();
+    context.restore();
+
+    context.save();
+    context.fillStyle = "rgba(255,255,255,.94)";
+    context.font = `700 ${Math.max(13, height * 0.025)}px Arial`;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    for (let index = 0; index < 5; index += 1) {
+      const x = width * (0.1 + index * 0.2);
+      const normalized = Math.abs(x / width - 0.5) * 2;
+      const y = height * (0.173 - 0.018 * normalized);
+      context.fillText("autoinside", x, y);
+    }
+    context.restore();
+
+    if (brandLogo) {
+      const logoWidth = width * 0.115;
+      const logoHeight = logoWidth * (brandLogo.height / brandLogo.width);
+      context.save();
+      context.globalAlpha = 0.96;
+      context.drawImage(brandLogo, width * 0.5 - logoWidth / 2, height * 0.032, logoWidth, logoHeight);
+      context.restore();
+    }
+
+    const floor = context.createLinearGradient(0, height * 0.64, 0, height);
+    floor.addColorStop(0, "rgba(255,255,255,0)");
+    floor.addColorStop(0.18, "rgba(230,233,235,.8)");
+    floor.addColorStop(1, "rgba(151,158,163,.82)");
+    context.fillStyle = floor;
+    context.fillRect(0, height * 0.62, width, height * 0.38);
+
+    context.save();
+    context.strokeStyle = "rgba(63,70,76,.34)";
+    context.lineWidth = Math.max(1, width * 0.0014);
+    context.beginPath();
+    context.ellipse(width * 0.5, height * 0.835, width * 0.39, height * 0.12, 0, 0, Math.PI * 2);
+    context.stroke();
+    context.restore();
+    return;
+  }
+
+  const palettes = {
+    studio: ["#fbfbfa", "#e7e8e6", "#cfd2cf"],
+    warm: ["#f3eee7", "#d7cec2", "#b8aea3"],
+    graphite: ["#3b3d40", "#1e2023", "#101113"],
+  } as const;
+  const [top, middle, bottom] = palettes[backdrop];
+  const wall = context.createLinearGradient(0, 0, 0, height);
+  wall.addColorStop(0, top);
+  wall.addColorStop(0.68, middle);
+  wall.addColorStop(1, bottom);
+  context.fillStyle = wall;
+  context.fillRect(0, 0, width, height);
+
+  const glow = context.createRadialGradient(width * 0.5, height * 0.4, 0, width * 0.5, height * 0.4, width * 0.58);
+  glow.addColorStop(0, backdrop === "graphite" ? "rgba(255,255,255,.17)" : "rgba(255,255,255,.9)");
+  glow.addColorStop(1, "rgba(255,255,255,0)");
+  context.fillStyle = glow;
+  context.fillRect(0, 0, width, height);
+}
+
 export default function Home() {
   const [sourceUrl, setSourceUrl] = useState("/sample-car.jpg");
   const [sourceName, setSourceName] = useState("RTC20250929100024473_0X.jpg");
   const [foregroundUrl, setForegroundUrl] = useState<string | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
-  const [backdrop, setBackdrop] = useState<Backdrop>("studio");
+  const [backdrop, setBackdrop] = useState<Backdrop>("blue");
   const [ratio, setRatio] = useState<Ratio>("16:9");
   const [platePoint, setPlatePoint] = useState<{ x: number; y: number } | null>(null);
   const [plateMode, setPlateMode] = useState(false);
@@ -90,44 +299,56 @@ export default function Home() {
     const context = canvas.getContext("2d");
     if (!context) return;
 
-    const palettes = {
-      studio: ["#fbfbfa", "#e7e8e6", "#cfd2cf"],
-      warm: ["#f3eee7", "#d7cec2", "#b8aea3"],
-      graphite: ["#3b3d40", "#1e2023", "#101113"],
-    } as const;
-    const [top, middle, bottom] = palettes[backdrop];
-    const wall = context.createLinearGradient(0, 0, 0, height);
-    wall.addColorStop(0, top);
-    wall.addColorStop(0.68, middle);
-    wall.addColorStop(1, bottom);
-    context.fillStyle = wall;
-    context.fillRect(0, 0, width, height);
+    const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
+    drawStudioBackdrop(context, width, height, backdrop, brandLogo);
 
-    const glow = context.createRadialGradient(width * 0.5, height * 0.44, 0, width * 0.5, height * 0.44, width * 0.58);
-    glow.addColorStop(0, backdrop === "graphite" ? "rgba(255,255,255,.17)" : "rgba(255,255,255,.9)");
-    glow.addColorStop(1, "rgba(255,255,255,0)");
-    context.fillStyle = glow;
-    context.fillRect(0, 0, width, height);
+    const bounds = getSubjectBounds(image);
+    const maxVehicleWidth = width * 0.76;
+    const maxVehicleHeight = height * 0.67;
+    const vehicleScale = Math.min(maxVehicleWidth / bounds.width, maxVehicleHeight / bounds.height);
+    const drawWidth = bounds.width * vehicleScale;
+    const drawHeight = bounds.height * vehicleScale;
+    const drawX = (width - drawWidth) / 2;
+    const floorY = height * (backdrop === "blue" ? 0.875 : 0.86);
+    const drawY = floorY - drawHeight;
+
+    const shadowCanvas = document.createElement("canvas");
+    shadowCanvas.width = Math.max(1, Math.round(bounds.width));
+    shadowCanvas.height = Math.max(1, Math.round(bounds.height));
+    const shadowContext = shadowCanvas.getContext("2d");
+    if (shadowContext) {
+      shadowContext.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, shadowCanvas.width, shadowCanvas.height);
+      shadowContext.globalCompositeOperation = "source-in";
+      shadowContext.fillStyle = "#080b0d";
+      shadowContext.fillRect(0, 0, shadowCanvas.width, shadowCanvas.height);
+
+      context.save();
+      context.globalAlpha = backdrop === "graphite" ? 0.62 : 0.32;
+      context.filter = `blur(${Math.max(10, width * 0.009)}px)`;
+      context.drawImage(
+        shadowCanvas,
+        drawX - drawWidth * 0.035,
+        floorY - drawHeight * 0.035,
+        drawWidth * 1.07,
+        drawHeight * 0.12,
+      );
+      context.restore();
+    }
 
     context.save();
-    context.filter = "blur(18px)";
-    context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.65)" : "rgba(30,35,38,.26)";
+    context.filter = `blur(${Math.max(4, width * 0.0035)}px)`;
+    context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.78)" : "rgba(18,22,25,.48)";
     context.beginPath();
-    context.ellipse(width * 0.52, height * 0.82, width * 0.34, height * 0.075, 0, 0, Math.PI * 2);
+    context.ellipse(drawX + drawWidth * 0.5, floorY - height * 0.004, drawWidth * 0.34, height * 0.026, 0, 0, Math.PI * 2);
     context.fill();
     context.restore();
 
-    const sourceRatio = image.width / image.height;
-    const drawRatio = targetRatio;
-    let drawWidth = width;
-    let drawHeight = drawWidth / sourceRatio;
-    if (drawHeight > height) {
-      drawHeight = height;
-      drawWidth = drawHeight * sourceRatio;
-    }
-    const drawX = (width - drawWidth) / 2;
-    const drawY = (height - drawHeight) / 2;
-    context.drawImage(image, drawX, drawY, drawWidth, drawHeight);
+    context.save();
+    context.filter = backdrop === "graphite"
+      ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
+      : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
+    context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
+    context.restore();
 
     if (platePoint) {
       const px = platePoint.x * width;
@@ -189,16 +410,18 @@ export default function Home() {
       const { removeBackground } = await import("@imgly/background-removal");
       const cutout = await removeBackground(sourceBlob, {
         publicPath: `${window.location.origin}/api/ai-assets/`,
-        model: "isnet_quint8",
-        device: "cpu",
+        model: "isnet_fp16",
+        device: "gpu",
         proxyToWorker: false,
         fetchArgs: { cache: "force-cache" },
         output: { format: "image/png", quality: 1, type: "foreground" },
         progress: (_key: string, current: number, total: number) => {
-          if (total > 0) setProgress(Math.max(6, Math.min(92, Math.round((current / total) * 92))));
+          if (total > 0) setProgress(Math.max(6, Math.min(90, Math.round((current / total) * 90))));
         },
       });
-      const nextUrl = URL.createObjectURL(cutout);
+      setProgress(94);
+      const refinedCutout = await refineCutout(cutout);
+      const nextUrl = URL.createObjectURL(refinedCutout);
       setForegroundUrl((old) => {
         if (old) URL.revokeObjectURL(old);
         return nextUrl;
