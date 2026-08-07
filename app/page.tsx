@@ -188,8 +188,11 @@ export default function Home() {
       const sourceBlob = await response.blob();
       const { default: removeBackground } = await import("@imgly/background-removal");
       const cutout = await removeBackground(sourceBlob, {
+        publicPath: `${window.location.origin}/api/ai-assets/`,
         model: "isnet_quint8",
         device: "cpu",
+        proxyToWorker: false,
+        fetchArgs: { cache: "force-cache" },
         output: { format: "image/png", quality: 1, type: "foreground" },
         progress: (_key: string, current: number, total: number) => {
           if (total > 0) setProgress(Math.max(6, Math.min(92, Math.round((current / total) * 92))));
@@ -205,7 +208,8 @@ export default function Home() {
     } catch (cause) {
       console.error(cause);
       setStatus("error");
-      setError("AI 모델을 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.");
+      const detail = cause instanceof Error ? cause.message : "알 수 없는 오류";
+      setError(`AI 모델을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요. (${detail})`);
     }
   }
 
