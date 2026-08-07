@@ -320,14 +320,28 @@ export default function Home() {
     drawStudioBackdrop(context, width, height, backdrop, brandLogo);
 
     const bounds = getSubjectBounds(image);
-    const maxVehicleWidth = width * 0.66;
-    const maxVehicleHeight = height * 0.59;
-    const vehicleScale = Math.min(maxVehicleWidth / bounds.width, maxVehicleHeight / bounds.height);
-    const drawWidth = bounds.width * vehicleScale;
-    const drawHeight = bounds.height * vehicleScale;
-    const drawX = (width - drawWidth) / 2;
-    const floorY = height * (backdrop === "blue" ? 0.855 : 0.85);
-    const drawY = floorY - drawHeight;
+    let drawWidth: number;
+    let drawHeight: number;
+    let drawX: number;
+    let drawY: number;
+    let floorY: number;
+    if (ratio === "original") {
+      const originalScale = width / image.width;
+      drawWidth = bounds.width * originalScale;
+      drawHeight = bounds.height * originalScale;
+      drawX = bounds.x * originalScale;
+      drawY = bounds.y * originalScale;
+      floorY = drawY + drawHeight;
+    } else {
+      const maxVehicleWidth = width * 0.66;
+      const maxVehicleHeight = height * 0.59;
+      const vehicleScale = Math.min(maxVehicleWidth / bounds.width, maxVehicleHeight / bounds.height);
+      drawWidth = bounds.width * vehicleScale;
+      drawHeight = bounds.height * vehicleScale;
+      drawX = (width - drawWidth) / 2;
+      floorY = height * (backdrop === "blue" ? 0.855 : 0.85);
+      drawY = floorY - drawHeight;
+    }
     const bottomProfile = getBottomProfile(image, bounds);
 
     context.save();
