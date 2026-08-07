@@ -186,7 +186,7 @@ export default function Home() {
     try {
       const response = await fetch(sourceUrl);
       const sourceBlob = await response.blob();
-      const { default: removeBackground } = await import("@imgly/background-removal");
+      const { removeBackground } = await import("@imgly/background-removal");
       const cutout = await removeBackground(sourceBlob, {
         publicPath: `${window.location.origin}/api/ai-assets/`,
         model: "isnet_quint8",
