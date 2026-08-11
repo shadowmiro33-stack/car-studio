@@ -441,6 +441,18 @@ function restoreOriginalFloor(
   context.drawImage(floorCanvas, 0, 0);
 }
 
+function drawImageCover(
+  context: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+) {
+  const scale = Math.max(width / image.width, height / image.height);
+  const drawWidth = image.width * scale;
+  const drawHeight = image.height * scale;
+  context.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+}
+
 export default function Home() {
   const [sourceUrl, setSourceUrl] = useState("/sample-car.jpg");
   const [sourceName, setSourceName] = useState("RTC20250929100024473_0X.jpg");
@@ -506,11 +518,17 @@ export default function Home() {
     const context = canvas.getContext("2d");
     if (!context) return;
 
-    const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
-    drawStudioBackdrop(context, width, height, backdrop, brandLogo);
     const detected = detectScene(sourceImage, image);
     setDetectedScene(detected);
     const effectiveScene = sceneMode === "auto" ? detected : sceneMode;
+    const renderBackdrop: Backdrop = effectiveScene === "outdoor" ? "blue" : backdrop;
+    if (effectiveScene === "outdoor") {
+      const outdoorStudio = await loadImage("/autoinside-outdoor-studio.png");
+      drawImageCover(context, outdoorStudio, width, height);
+    } else {
+      const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
+      drawStudioBackdrop(context, width, height, backdrop, brandLogo);
+    }
     const preserveFloor = effectiveScene === "studio" && ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
     if (preserveFloor) restoreOriginalFloor(context, sourceImage, width, height);
 
@@ -534,7 +552,7 @@ export default function Home() {
       drawWidth = bounds.width * vehicleScale;
       drawHeight = bounds.height * vehicleScale;
       drawX = (width - drawWidth) / 2;
-      floorY = height * (backdrop === "blue" ? 0.855 : 0.85);
+      floorY = height * (renderBackdrop === "blue" ? 0.855 : 0.85);
       drawY = floorY - drawHeight;
     }
     const bottomProfile = getBottomProfile(image, bounds);
@@ -551,7 +569,7 @@ export default function Home() {
         floorY,
         width,
         height,
-        backdrop,
+        renderBackdrop,
       );
     }
 
@@ -559,7 +577,7 @@ export default function Home() {
       const first = bottomProfile[0];
       context.save();
       context.filter = `blur(${Math.max(1.5, width * 0.0012)}px)`;
-      context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.48)" : "rgba(8,11,13,.34)";
+      context.fillStyle = renderBackdrop === "graphite" ? "rgba(0,0,0,.48)" : "rgba(8,11,13,.34)";
       context.beginPath();
       context.moveTo(drawX + drawWidth * first.x, drawY + drawHeight * first.y);
       for (const point of bottomProfile.slice(1)) {
@@ -577,7 +595,7 @@ export default function Home() {
     }
 
     context.save();
-    context.filter = backdrop === "graphite"
+    context.filter = renderBackdrop === "graphite"
       ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
       : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
     context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
@@ -770,11 +788,11 @@ export default function Home() {
           <p className="scene-note">
             {sceneMode === "auto"
               ? detectedScene
-                ? `자동 인식: ${detectedScene === "studio" ? "촬영장 · 바닥 유지" : "야외 · 전체 스튜디오 변환"}`
+                ? `자동 인식: ${detectedScene === "studio" ? "촬영장 · 바닥 유지" : "야외 · 오토인사이드 촬영장 적용"}`
                 : "AI 변환 시 촬영장과 야외를 자동으로 구분합니다"
               : sceneMode === "studio"
                 ? "기존 바닥과 실제 그림자를 유지하고 벽만 교체합니다"
-                : "야외 배경과 바닥을 스튜디오 형태로 변환합니다"}
+                : "야외 배경과 바닥을 오토인사이드 촬영장으로 변환합니다"}
           </p>
           <button className={`plate-button ${plateMode ? "active" : ""}`} disabled={!resultUrl} onClick={() => setPlateMode((value) => !value)}>
             <span>▰</span><span><strong>번호판 보호</strong><small>{platePoint ? "위치 지정됨 · 다시 누르면 재설정" : "누른 뒤 이미지의 번호판을 선택"}</small></span>
