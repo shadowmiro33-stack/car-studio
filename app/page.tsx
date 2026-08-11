@@ -1,9 +1,11 @@
 "use client";
 
-import { ChangeEvent, DragEvent, MouseEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, MouseEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 
 type Backdrop = "blue" | "studio" | "warm" | "graphite";
 type Ratio = "original" | "16:9" | "4:3" | "1:1";
+type SceneMode = "auto" | "studio" | "outdoor";
+type SceneKind = Exclude<SceneMode, "auto">;
 
 const backdropNames: Record<Backdrop, string> = {
   blue: "블루 커브 스튜디오",
@@ -159,6 +161,54 @@ function estimateLight(image: HTMLImageElement, bounds: SubjectBounds): LightEst
     projectionScale: 0.105 + Math.abs(castDirection) * 0.055,
     opacity: Math.max(0.16, Math.min(0.27, 0.25 - brightness / 1800)),
   };
+}
+
+function detectScene(source: HTMLImageElement, foreground: HTMLImageElement): SceneKind {
+  const analysisWidth = 360;
+  const analysisHeight = Math.max(1, Math.round(analysisWidth * (source.height / source.width)));
+  const sourceCanvas = document.createElement("canvas");
+  const maskCanvas = document.createElement("canvas");
+  sourceCanvas.width = maskCanvas.width = analysisWidth;
+  sourceCanvas.height = maskCanvas.height = analysisHeight;
+  const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
+  const maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
+  if (!sourceContext || !maskContext) return "outdoor";
+  sourceContext.drawImage(source, 0, 0, analysisWidth, analysisHeight);
+  maskContext.drawImage(foreground, 0, 0, analysisWidth, analysisHeight);
+  const sourcePixels = sourceContext.getImageData(0, 0, analysisWidth, analysisHeight).data;
+  const maskPixels = maskContext.getImageData(0, 0, analysisWidth, analysisHeight).data;
+  let saturationTotal = 0;
+  let greenPixels = 0;
+  let textureTotal = 0;
+  let samples = 0;
+
+  for (let y = 2; y < analysisHeight * 0.62; y += 3) {
+    for (let x = 2; x < analysisWidth - 3; x += 3) {
+      const offset = (Math.floor(y) * analysisWidth + x) * 4;
+      if (maskPixels[offset + 3] > 48) continue;
+      const r = sourcePixels[offset];
+      const g = sourcePixels[offset + 1];
+      const b = sourcePixels[offset + 2];
+      const maximum = Math.max(r, g, b);
+      const minimum = Math.min(r, g, b);
+      saturationTotal += maximum ? (maximum - minimum) / maximum : 0;
+      if (g > r * 1.08 && g > b * 1.06 && g > 55) greenPixels += 1;
+      const right = offset + 12;
+      const below = offset + analysisWidth * 4 * 3;
+      const luminance = r * 0.2126 + g * 0.7152 + b * 0.0722;
+      const rightLuminance = sourcePixels[right] * 0.2126 + sourcePixels[right + 1] * 0.7152 + sourcePixels[right + 2] * 0.0722;
+      const belowLuminance = sourcePixels[below] * 0.2126 + sourcePixels[below + 1] * 0.7152 + sourcePixels[below + 2] * 0.0722;
+      textureTotal += (Math.abs(luminance - rightLuminance) + Math.abs(luminance - belowLuminance)) / 2;
+      samples += 1;
+    }
+  }
+
+  if (samples < 80) return "outdoor";
+  const saturation = saturationTotal / samples;
+  const greenRatio = greenPixels / samples;
+  const texture = textureTotal / samples;
+  const outdoorScore = saturation * 2.1 + greenRatio * 1.6 + Math.max(0, texture - 8) / 24;
+  return outdoorScore >= 0.72 ? "outdoor" : "studio";
 }
 
 function drawProjectedShadow(
@@ -404,6 +454,9 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<"idle" | "working" | "done" | "error">("idle");
   const [error, setError] = useState("");
+  const [sceneMode, setSceneMode] = useState<SceneMode>("auto");
+  const [detectedScene, setDetectedScene] = useState<SceneKind | null>(null);
+  const [draggingCompare, setDraggingCompare] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const objectUrlsRef = useRef<Set<string>>(new Set());
 
@@ -430,7 +483,7 @@ export default function Home() {
     if (!foregroundUrl) return;
     void composeResult(foregroundUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [foregroundUrl, backdrop, ratio, platePoint]);
+  }, [foregroundUrl, backdrop, ratio, platePoint, sceneMode]);
 
   async function composeResult(foreground: string) {
     const [image, sourceImage] = await Promise.all([loadImage(foreground), loadImage(sourceUrl)]);
@@ -455,7 +508,10 @@ export default function Home() {
 
     const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
     drawStudioBackdrop(context, width, height, backdrop, brandLogo);
-    const preserveFloor = ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
+    const detected = detectScene(sourceImage, image);
+    setDetectedScene(detected);
+    const effectiveScene = sceneMode === "auto" ? detected : sceneMode;
+    const preserveFloor = effectiveScene === "studio" && ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
     if (preserveFloor) restoreOriginalFloor(context, sourceImage, width, height);
 
     const bounds = getSubjectBounds(image);
@@ -573,6 +629,7 @@ export default function Home() {
     });
     setPlatePoint(null);
     setStatus("idle");
+    setDetectedScene(null);
     setProgress(0);
     setError("");
   }
@@ -631,6 +688,23 @@ export default function Home() {
     link.click();
   }
 
+  function updateCompareFromPointer(event: ReactPointerEvent<HTMLDivElement>) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setCompare(Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100)));
+  }
+
+  function startCompareDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!resultUrl || plateMode) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDraggingCompare(true);
+    updateCompareFromPointer(event);
+  }
+
+  function moveCompareDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!draggingCompare || !resultUrl) return;
+    updateCompareFromPointer(event);
+  }
+
   function handleBrokenResult() {
     if (!resultUrl) return;
     setResultUrl((old) => {
@@ -685,6 +759,23 @@ export default function Home() {
           <div className="segments">
             {(Object.keys(ratioValues) as Ratio[]).map((key) => <button key={key} className={ratio === key ? "active" : ""} onClick={() => setRatio(key)}>{key === "original" ? "원본" : key}</button>)}
           </div>
+          <label className="label">원본 환경</label>
+          <div className="scene-modes">
+            {(["auto", "studio", "outdoor"] as SceneMode[]).map((mode) => (
+              <button key={mode} className={sceneMode === mode ? "active" : ""} onClick={() => setSceneMode(mode)}>
+                {mode === "auto" ? "자동" : mode === "studio" ? "촬영장" : "야외"}
+              </button>
+            ))}
+          </div>
+          <p className="scene-note">
+            {sceneMode === "auto"
+              ? detectedScene
+                ? `자동 인식: ${detectedScene === "studio" ? "촬영장 · 바닥 유지" : "야외 · 전체 스튜디오 변환"}`
+                : "AI 변환 시 촬영장과 야외를 자동으로 구분합니다"
+              : sceneMode === "studio"
+                ? "기존 바닥과 실제 그림자를 유지하고 벽만 교체합니다"
+                : "야외 배경과 바닥을 스튜디오 형태로 변환합니다"}
+          </p>
           <button className={`plate-button ${plateMode ? "active" : ""}`} disabled={!resultUrl} onClick={() => setPlateMode((value) => !value)}>
             <span>▰</span><span><strong>번호판 보호</strong><small>{platePoint ? "위치 지정됨 · 다시 누르면 재설정" : "누른 뒤 이미지의 번호판을 선택"}</small></span>
           </button>
@@ -711,7 +802,14 @@ export default function Home() {
             <div><span className="status-dot" />{resultUrl ? "변환 완료" : "원본 준비됨"}</div>
             {resultUrl && <button className="download" onClick={downloadResult}>↓ 결과 저장</button>}
           </div>
-          <div className={`image-stage ${plateMode ? "targeting" : ""}`} onClick={placePlate}>
+          <div
+            className={`image-stage ${plateMode ? "targeting" : ""} ${resultUrl ? "comparing" : ""} ${draggingCompare ? "dragging" : ""}`}
+            onClick={placePlate}
+            onPointerDown={startCompareDrag}
+            onPointerMove={moveCompareDrag}
+            onPointerUp={() => setDraggingCompare(false)}
+            onPointerCancel={() => setDraggingCompare(false)}
+          >
             <img className="result-image" src={resultUrl ?? sourceUrl} alt={resultUrl ? "AI 스튜디오 변환 결과" : "변환 전 차량 원본"} onError={handleBrokenResult} />
             {resultUrl && <div className="original-layer" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={sourceUrl} alt="변환 전 원본 비교" /></div>}
             {resultUrl && <div className="compare-line" style={{ left: `${compare}%` }}><i>↔</i></div>}
