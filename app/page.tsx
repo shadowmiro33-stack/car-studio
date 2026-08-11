@@ -572,7 +572,16 @@ export default function Home() {
     let drawX: number;
     let drawY: number;
     let floorY: number;
-    if (ratio === "original") {
+    if (effectiveScene === "outdoor") {
+      const maxVehicleWidth = width * 0.64;
+      const maxVehicleHeight = height * 0.54;
+      const vehicleScale = Math.min(maxVehicleWidth / bounds.width, maxVehicleHeight / bounds.height);
+      drawWidth = bounds.width * vehicleScale;
+      drawHeight = bounds.height * vehicleScale;
+      drawX = (width - drawWidth) / 2;
+      floorY = height * 0.825;
+      drawY = floorY - drawHeight;
+    } else if (ratio === "original") {
       const originalScale = width / image.width;
       drawWidth = bounds.width * originalScale;
       drawHeight = bounds.height * originalScale;
