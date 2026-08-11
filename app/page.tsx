@@ -43,6 +43,7 @@ function roundedRect(
 
 type SubjectBounds = { x: number; y: number; width: number; height: number };
 type BottomPoint = { x: number; y: number };
+type LightEstimate = { castDirection: number; projectionScale: number; opacity: number };
 
 function getSubjectBounds(image: HTMLImageElement): SubjectBounds {
   const analysisSize = 720;
@@ -110,6 +111,104 @@ function getBottomProfile(image: HTMLImageElement, bounds: SubjectBounds): Botto
     }
   }
   return points;
+}
+
+function estimateLight(image: HTMLImageElement, bounds: SubjectBounds): LightEstimate {
+  const analysisWidth = 320;
+  const analysisHeight = Math.max(1, Math.round(analysisWidth * (bounds.height / bounds.width)));
+  const canvas = document.createElement("canvas");
+  canvas.width = analysisWidth;
+  canvas.height = analysisHeight;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return { castDirection: 0, projectionScale: 0.12, opacity: 0.2 };
+  context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, analysisWidth, analysisHeight);
+  const pixels = context.getImageData(0, 0, analysisWidth, analysisHeight).data;
+  let leftLight = 0;
+  let rightLight = 0;
+  let leftWeight = 0;
+  let rightWeight = 0;
+  let subjectLight = 0;
+  let subjectWeight = 0;
+
+  for (let y = 0; y < analysisHeight * 0.82; y += 3) {
+    for (let x = 0; x < analysisWidth; x += 3) {
+      const offset = (Math.floor(y) * analysisWidth + x) * 4;
+      const alpha = pixels[offset + 3] / 255;
+      if (alpha < 0.55) continue;
+      const luminance = pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722;
+      const highlightWeight = alpha * Math.pow(luminance / 255, 2.4);
+      subjectLight += luminance * alpha;
+      subjectWeight += alpha;
+      if (x < analysisWidth / 2) {
+        leftLight += luminance * highlightWeight;
+        leftWeight += highlightWeight;
+      } else {
+        rightLight += luminance * highlightWeight;
+        rightWeight += highlightWeight;
+      }
+    }
+  }
+
+  const leftAverage = leftWeight ? leftLight / leftWeight : 128;
+  const rightAverage = rightWeight ? rightLight / rightWeight : 128;
+  const brightness = subjectWeight ? subjectLight / subjectWeight : 150;
+  const rawDirection = (leftAverage - rightAverage) / 34;
+  const castDirection = Math.max(-1, Math.min(1, Math.abs(rawDirection) < 0.12 ? 0 : rawDirection));
+  return {
+    castDirection,
+    projectionScale: 0.105 + Math.abs(castDirection) * 0.055,
+    opacity: Math.max(0.16, Math.min(0.27, 0.25 - brightness / 1800)),
+  };
+}
+
+function drawProjectedShadow(
+  context: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  bounds: SubjectBounds,
+  drawX: number,
+  drawY: number,
+  drawWidth: number,
+  drawHeight: number,
+  floorY: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  backdrop: Backdrop,
+) {
+  const light = estimateLight(image, bounds);
+  const slope = light.castDirection * 0.22;
+  const shadowOpacity = backdrop === "graphite" ? light.opacity * 1.45 : light.opacity;
+
+  context.save();
+  context.beginPath();
+  context.rect(0, floorY - Math.max(2, canvasHeight * 0.003), canvasWidth, canvasHeight - floorY + 8);
+  context.clip();
+  context.filter = `brightness(0) saturate(0) blur(${Math.max(6, canvasWidth * 0.0045)}px) opacity(${shadowOpacity})`;
+  context.transform(
+    1,
+    0,
+    -slope,
+    -light.projectionScale,
+    slope * floorY,
+    floorY * (1 + light.projectionScale),
+  );
+  context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
+  context.restore();
+
+  context.save();
+  context.filter = `blur(${Math.max(3, canvasWidth * 0.0022)}px)`;
+  context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.5)" : "rgba(10,13,15,.32)";
+  context.beginPath();
+  context.ellipse(
+    drawX + drawWidth * (0.5 + light.castDirection * 0.018),
+    floorY,
+    drawWidth * 0.29,
+    Math.max(4, canvasHeight * 0.007),
+    0,
+    0,
+    Math.PI * 2,
+  );
+  context.fill();
+  context.restore();
 }
 
 async function refineCutout(blob: Blob): Promise<Blob> {
@@ -344,47 +443,25 @@ export default function Home() {
     }
     const bottomProfile = getBottomProfile(image, bounds);
 
-    // A broad ambient shadow gives the vehicle weight without changing its
-    // original scale or position. It stays soft enough to blend into the floor.
-    context.save();
-    context.filter = `blur(${Math.max(10, width * 0.007)}px)`;
-    context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.38)" : "rgba(20,24,27,.22)";
-    context.beginPath();
-    context.ellipse(
-      drawX + drawWidth * 0.51,
-      floorY - drawHeight * 0.006,
-      drawWidth * 0.4,
-      Math.max(10, height * 0.024),
-      0,
-      0,
-      Math.PI * 2,
+    drawProjectedShadow(
+      context,
+      image,
+      bounds,
+      drawX,
+      drawY,
+      drawWidth,
+      drawHeight,
+      floorY,
+      width,
+      height,
+      backdrop,
     );
-    context.fill();
-    context.restore();
-
-    // A tighter underbody shadow bridges the soft floor shadow and the tyre
-    // contact profile, avoiding both a floating look and detached dark spots.
-    context.save();
-    context.filter = `blur(${Math.max(5, width * 0.0035)}px)`;
-    context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.52)" : "rgba(12,15,17,.34)";
-    context.beginPath();
-    context.ellipse(
-      drawX + drawWidth * 0.5,
-      floorY - drawHeight * 0.01,
-      drawWidth * 0.31,
-      Math.max(7, height * 0.014),
-      0,
-      0,
-      Math.PI * 2,
-    );
-    context.fill();
-    context.restore();
 
     if (bottomProfile.length > 1) {
       const first = bottomProfile[0];
       context.save();
-      context.filter = `blur(${Math.max(2, width * 0.0016)}px)`;
-      context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.74)" : "rgba(8,11,13,.58)";
+      context.filter = `blur(${Math.max(1.5, width * 0.0012)}px)`;
+      context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.48)" : "rgba(8,11,13,.34)";
       context.beginPath();
       context.moveTo(drawX + drawWidth * first.x, drawY + drawHeight * first.y);
       for (const point of bottomProfile.slice(1)) {
@@ -393,7 +470,7 @@ export default function Home() {
       for (const point of [...bottomProfile].reverse()) {
         context.lineTo(
           drawX + drawWidth * point.x,
-          drawY + drawHeight * point.y + Math.max(6, height * 0.012),
+          drawY + drawHeight * point.y + Math.max(3, height * 0.006),
         );
       }
       context.closePath();
