@@ -261,6 +261,40 @@ function drawProjectedShadow(
   context.restore();
 }
 
+function drawDiffuseStudioShadow(
+  context: CanvasRenderingContext2D,
+  drawX: number,
+  drawWidth: number,
+  drawHeight: number,
+  floorY: number,
+  canvasWidth: number,
+  canvasHeight: number,
+) {
+  const layers = [
+    { x: 0.5, y: 0.018, radiusX: 0.39, radiusY: 0.025, blur: 0.0065, color: "rgba(28,31,34,.18)" },
+    { x: 0.49, y: 0.034, radiusX: 0.31, radiusY: 0.013, blur: 0.0034, color: "rgba(18,21,23,.3)" },
+    { x: 0.48, y: 0.044, radiusX: 0.235, radiusY: 0.0065, blur: 0.0018, color: "rgba(10,12,14,.38)" },
+  ];
+
+  for (const layer of layers) {
+    context.save();
+    context.filter = `blur(${Math.max(2, canvasWidth * layer.blur)}px)`;
+    context.fillStyle = layer.color;
+    context.beginPath();
+    context.ellipse(
+      drawX + drawWidth * layer.x,
+      floorY - drawHeight * layer.y,
+      drawWidth * layer.radiusX,
+      Math.max(3, canvasHeight * layer.radiusY),
+      0,
+      0,
+      Math.PI * 2,
+    );
+    context.fill();
+    context.restore();
+  }
+}
+
 async function refineCutout(blob: Blob): Promise<Blob> {
   const source = URL.createObjectURL(blob);
   try {
@@ -557,7 +591,9 @@ export default function Home() {
     }
     const bottomProfile = getBottomProfile(image, bounds);
 
-    if (!preserveFloor) {
+    if (!preserveFloor && effectiveScene === "outdoor") {
+      drawDiffuseStudioShadow(context, drawX, drawWidth, drawHeight, floorY, width, height);
+    } else if (!preserveFloor) {
       drawProjectedShadow(
         context,
         image,
@@ -573,7 +609,7 @@ export default function Home() {
       );
     }
 
-    if (!preserveFloor && bottomProfile.length > 1) {
+    if (!preserveFloor && effectiveScene !== "outdoor" && bottomProfile.length > 1) {
       const first = bottomProfile[0];
       context.save();
       context.filter = `blur(${Math.max(1.5, width * 0.0012)}px)`;
@@ -595,9 +631,11 @@ export default function Home() {
     }
 
     context.save();
-    context.filter = renderBackdrop === "graphite"
-      ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
-      : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
+    context.filter = effectiveScene === "outdoor"
+      ? "drop-shadow(0 1px 1px rgba(0,0,0,.18)) brightness(1.07) contrast(.94) saturate(.86)"
+      : renderBackdrop === "graphite"
+        ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
+        : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
     context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
     context.restore();
 
