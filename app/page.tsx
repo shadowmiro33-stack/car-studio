@@ -211,6 +211,99 @@ function detectScene(source: HTMLImageElement, foreground: HTMLImageElement): Sc
   return outdoorScore >= 0.72 ? "outdoor" : "studio";
 }
 
+function estimateFloorHorizon(source: HTMLImageElement, foreground: HTMLImageElement) {
+  const width = 420;
+  const height = Math.max(1, Math.round(width * (source.height / source.width)));
+  const sourceCanvas = document.createElement("canvas");
+  const maskCanvas = document.createElement("canvas");
+  sourceCanvas.width = maskCanvas.width = width;
+  sourceCanvas.height = maskCanvas.height = height;
+  const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
+  const maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
+  if (!sourceContext || !maskContext) return 0.7;
+  sourceContext.drawImage(source, 0, 0, width, height);
+  maskContext.drawImage(foreground, 0, 0, width, height);
+  const pixels = sourceContext.getImageData(0, 0, width, height).data;
+  const mask = maskContext.getImageData(0, 0, width, height).data;
+  let bestRow = Math.round(height * 0.7);
+  let bestScore = 0;
+
+  for (let y = Math.round(height * 0.5); y <= Math.round(height * 0.82); y += 1) {
+    let score = 0;
+    let samples = 0;
+    for (let x = 3; x < width - 3; x += 3) {
+      const upper = ((y - 2) * width + x) * 4;
+      const lower = ((y + 2) * width + x) * 4;
+      if (mask[upper + 3] > 42 || mask[lower + 3] > 42) continue;
+      const upperLight = pixels[upper] * 0.2126 + pixels[upper + 1] * 0.7152 + pixels[upper + 2] * 0.0722;
+      const lowerLight = pixels[lower] * 0.2126 + pixels[lower + 1] * 0.7152 + pixels[lower + 2] * 0.0722;
+      score += Math.abs(upperLight - lowerLight);
+      samples += 1;
+    }
+    if (samples < 24) continue;
+    const average = score / samples;
+    if (average > bestScore) {
+      bestScore = average;
+      bestRow = y;
+    }
+  }
+
+  return Math.max(0.56, Math.min(0.8, bestRow / height));
+}
+
+function createStudioGradedVehicle(image: HTMLImageElement, bounds: SubjectBounds) {
+  const scale = Math.min(1, 1200 / Math.max(bounds.width, bounds.height));
+  const width = Math.max(1, Math.round(bounds.width * scale));
+  const height = Math.max(1, Math.round(bounds.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return canvas;
+  context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, width, height);
+  const imageData = context.getImageData(0, 0, width, height);
+  const pixels = imageData.data;
+  const original = new Uint8ClampedArray(pixels);
+  const radius = Math.max(10, Math.round(width * 0.028));
+  const samples = [[-radius, 0], [radius, 0], [0, -radius], [0, radius], [-radius, -radius], [radius, -radius], [-radius, radius], [radius, radius]];
+
+  for (let y = 0; y < height * 0.62; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 4;
+      if (original[offset + 3] < 96) continue;
+      const r = original[offset];
+      const g = original[offset + 1];
+      const b = original[offset + 2];
+      const luminance = r * 0.2126 + g * 0.7152 + b * 0.0722;
+      if (luminance < 224) continue;
+      let ringLight = 0;
+      let ringSamples = 0;
+      for (const [dx, dy] of samples) {
+        const sampleX = x + dx;
+        const sampleY = y + dy;
+        if (sampleX < 0 || sampleX >= width || sampleY < 0 || sampleY >= height) continue;
+        const sampleOffset = (sampleY * width + sampleX) * 4;
+        if (original[sampleOffset + 3] < 96) continue;
+        ringLight += original[sampleOffset] * 0.2126 + original[sampleOffset + 1] * 0.7152 + original[sampleOffset + 2] * 0.0722;
+        ringSamples += 1;
+      }
+      if (ringSamples < 3) continue;
+      const neighborhood = ringLight / ringSamples;
+      const excess = luminance - neighborhood;
+      if (excess < 30) continue;
+      const strength = Math.min(0.82, (excess - 30) / 85);
+      const targetLight = Math.min(luminance, neighborhood + 24);
+      const factor = (luminance * (1 - strength) + targetLight * strength) / luminance;
+      pixels[offset] = Math.round(r * factor);
+      pixels[offset + 1] = Math.round(g * factor);
+      pixels[offset + 2] = Math.round(b * factor);
+    }
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
 function drawProjectedShadow(
   context: CanvasRenderingContext2D,
   image: HTMLImageElement,
@@ -454,6 +547,7 @@ function restoreOriginalFloor(
   source: HTMLImageElement,
   width: number,
   height: number,
+  horizonRatio: number,
 ) {
   const floorCanvas = document.createElement("canvas");
   floorCanvas.width = width;
@@ -462,8 +556,8 @@ function restoreOriginalFloor(
   if (!floorContext) return;
 
   floorContext.drawImage(source, 0, 0, width, height);
-  const horizon = height * 0.58;
-  const feather = height * 0.055;
+  const horizon = height * horizonRatio;
+  const feather = height * 0.018;
   const mask = floorContext.createLinearGradient(0, horizon - feather, 0, horizon + feather);
   mask.addColorStop(0, "rgba(0,0,0,0)");
   mask.addColorStop(0.48, "rgba(0,0,0,.08)");
@@ -564,7 +658,10 @@ export default function Home() {
       drawStudioBackdrop(context, width, height, backdrop, brandLogo);
     }
     const preserveFloor = effectiveScene === "studio" && ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
-    if (preserveFloor) restoreOriginalFloor(context, sourceImage, width, height);
+    if (preserveFloor) {
+      const floorHorizon = estimateFloorHorizon(sourceImage, image);
+      restoreOriginalFloor(context, sourceImage, width, height, floorHorizon);
+    }
 
     const bounds = getSubjectBounds(image);
     let drawWidth: number;
@@ -599,6 +696,7 @@ export default function Home() {
       drawY = floorY - drawHeight;
     }
     const bottomProfile = getBottomProfile(image, bounds);
+    const studioVehicle = effectiveScene === "outdoor" ? createStudioGradedVehicle(image, bounds) : null;
 
     if (!preserveFloor && effectiveScene === "outdoor") {
       drawDiffuseStudioShadow(context, drawX, drawWidth, drawHeight, floorY, width, height);
@@ -645,7 +743,11 @@ export default function Home() {
       : renderBackdrop === "graphite"
         ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
         : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
-    context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
+    if (studioVehicle) {
+      context.drawImage(studioVehicle, 0, 0, studioVehicle.width, studioVehicle.height, drawX, drawY, drawWidth, drawHeight);
+    } else {
+      context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
+    }
     context.restore();
 
     if (platePoint) {
