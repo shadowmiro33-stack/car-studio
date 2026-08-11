@@ -344,15 +344,35 @@ export default function Home() {
     }
     const bottomProfile = getBottomProfile(image, bounds);
 
+    // A broad ambient shadow gives the vehicle weight without changing its
+    // original scale or position. It stays soft enough to blend into the floor.
     context.save();
-    context.filter = `blur(${Math.max(7, width * 0.005)}px)`;
-    context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.34)" : "rgba(20,24,27,.16)";
+    context.filter = `blur(${Math.max(10, width * 0.007)}px)`;
+    context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.38)" : "rgba(20,24,27,.22)";
+    context.beginPath();
+    context.ellipse(
+      drawX + drawWidth * 0.51,
+      floorY - drawHeight * 0.006,
+      drawWidth * 0.4,
+      Math.max(10, height * 0.024),
+      0,
+      0,
+      Math.PI * 2,
+    );
+    context.fill();
+    context.restore();
+
+    // A tighter underbody shadow bridges the soft floor shadow and the tyre
+    // contact profile, avoiding both a floating look and detached dark spots.
+    context.save();
+    context.filter = `blur(${Math.max(5, width * 0.0035)}px)`;
+    context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.52)" : "rgba(12,15,17,.34)";
     context.beginPath();
     context.ellipse(
       drawX + drawWidth * 0.5,
-      floorY - drawHeight * 0.012,
-      drawWidth * 0.37,
-      height * 0.013,
+      floorY - drawHeight * 0.01,
+      drawWidth * 0.31,
+      Math.max(7, height * 0.014),
       0,
       0,
       Math.PI * 2,
@@ -363,8 +383,8 @@ export default function Home() {
     if (bottomProfile.length > 1) {
       const first = bottomProfile[0];
       context.save();
-      context.filter = `blur(${Math.max(2, width * 0.0014)}px)`;
-      context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.66)" : "rgba(12,15,17,.46)";
+      context.filter = `blur(${Math.max(2, width * 0.0016)}px)`;
+      context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.74)" : "rgba(8,11,13,.58)";
       context.beginPath();
       context.moveTo(drawX + drawWidth * first.x, drawY + drawHeight * first.y);
       for (const point of bottomProfile.slice(1)) {
@@ -373,7 +393,7 @@ export default function Home() {
       for (const point of [...bottomProfile].reverse()) {
         context.lineTo(
           drawX + drawWidth * point.x,
-          drawY + drawHeight * point.y + Math.max(5, height * 0.01),
+          drawY + drawHeight * point.y + Math.max(6, height * 0.012),
         );
       }
       context.closePath();
