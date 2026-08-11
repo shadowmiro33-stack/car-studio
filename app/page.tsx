@@ -365,6 +365,32 @@ function drawStudioBackdrop(
   context.fillRect(0, 0, width, height);
 }
 
+function restoreOriginalFloor(
+  context: CanvasRenderingContext2D,
+  source: HTMLImageElement,
+  width: number,
+  height: number,
+) {
+  const floorCanvas = document.createElement("canvas");
+  floorCanvas.width = width;
+  floorCanvas.height = height;
+  const floorContext = floorCanvas.getContext("2d");
+  if (!floorContext) return;
+
+  floorContext.drawImage(source, 0, 0, width, height);
+  const horizon = height * 0.58;
+  const feather = height * 0.055;
+  const mask = floorContext.createLinearGradient(0, horizon - feather, 0, horizon + feather);
+  mask.addColorStop(0, "rgba(0,0,0,0)");
+  mask.addColorStop(0.48, "rgba(0,0,0,.08)");
+  mask.addColorStop(1, "rgba(0,0,0,1)");
+  floorContext.globalCompositeOperation = "destination-in";
+  floorContext.fillStyle = mask;
+  floorContext.fillRect(0, horizon - feather, width, height - horizon + feather);
+  floorContext.globalCompositeOperation = "source-over";
+  context.drawImage(floorCanvas, 0, 0);
+}
+
 export default function Home() {
   const [sourceUrl, setSourceUrl] = useState("/sample-car.jpg");
   const [sourceName, setSourceName] = useState("RTC20250929100024473_0X.jpg");
@@ -379,14 +405,26 @@ export default function Home() {
   const [status, setStatus] = useState<"idle" | "working" | "done" | "error">("idle");
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const objectUrlsRef = useRef<Set<string>>(new Set());
+
+  function createTrackedUrl(blob: Blob) {
+    const url = URL.createObjectURL(blob);
+    objectUrlsRef.current.add(url);
+    return url;
+  }
+
+  function releaseTrackedUrl(url: string | null) {
+    if (!url || !objectUrlsRef.current.has(url)) return;
+    URL.revokeObjectURL(url);
+    objectUrlsRef.current.delete(url);
+  }
 
   useEffect(() => {
     return () => {
-      if (sourceUrl.startsWith("blob:")) URL.revokeObjectURL(sourceUrl);
-      if (foregroundUrl) URL.revokeObjectURL(foregroundUrl);
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
+      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      objectUrlsRef.current.clear();
     };
-  }, [sourceUrl, foregroundUrl, resultUrl]);
+  }, []);
 
   useEffect(() => {
     if (!foregroundUrl) return;
@@ -395,7 +433,7 @@ export default function Home() {
   }, [foregroundUrl, backdrop, ratio, platePoint]);
 
   async function composeResult(foreground: string) {
-    const image = await loadImage(foreground);
+    const [image, sourceImage] = await Promise.all([loadImage(foreground), loadImage(sourceUrl)]);
     const targetRatio = ratioValues[ratio] ?? image.width / image.height;
     const maxSide = 1800;
     let width = image.width;
@@ -417,6 +455,8 @@ export default function Home() {
 
     const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
     drawStudioBackdrop(context, width, height, backdrop, brandLogo);
+    const preserveFloor = ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
+    if (preserveFloor) restoreOriginalFloor(context, sourceImage, width, height);
 
     const bounds = getSubjectBounds(image);
     let drawWidth: number;
@@ -443,21 +483,23 @@ export default function Home() {
     }
     const bottomProfile = getBottomProfile(image, bounds);
 
-    drawProjectedShadow(
-      context,
-      image,
-      bounds,
-      drawX,
-      drawY,
-      drawWidth,
-      drawHeight,
-      floorY,
-      width,
-      height,
-      backdrop,
-    );
+    if (!preserveFloor) {
+      drawProjectedShadow(
+        context,
+        image,
+        bounds,
+        drawX,
+        drawY,
+        drawWidth,
+        drawHeight,
+        floorY,
+        width,
+        height,
+        backdrop,
+      );
+    }
 
-    if (bottomProfile.length > 1) {
+    if (!preserveFloor && bottomProfile.length > 1) {
       const first = bottomProfile[0];
       context.save();
       context.filter = `blur(${Math.max(1.5, width * 0.0012)}px)`;
@@ -506,27 +548,27 @@ export default function Home() {
 
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.94));
     if (!blob) return;
-    const nextUrl = URL.createObjectURL(blob);
+    const nextUrl = createTrackedUrl(blob);
     setResultUrl((old) => {
-      if (old) URL.revokeObjectURL(old);
+      releaseTrackedUrl(old);
       return nextUrl;
     });
   }
 
   function acceptFile(file?: File) {
     if (!file || !file.type.startsWith("image/")) return;
-    const next = URL.createObjectURL(file);
+    const next = createTrackedUrl(file);
     setSourceUrl((old) => {
-      if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+      releaseTrackedUrl(old);
       return next;
     });
     setSourceName(file.name);
     setForegroundUrl((old) => {
-      if (old) URL.revokeObjectURL(old);
+      releaseTrackedUrl(old);
       return null;
     });
     setResultUrl((old) => {
-      if (old) URL.revokeObjectURL(old);
+      releaseTrackedUrl(old);
       return null;
     });
     setPlatePoint(null);
@@ -556,9 +598,9 @@ export default function Home() {
       });
       setProgress(94);
       const refinedCutout = await refineCutout(cutout);
-      const nextUrl = URL.createObjectURL(refinedCutout);
+      const nextUrl = createTrackedUrl(refinedCutout);
       setForegroundUrl((old) => {
-        if (old) URL.revokeObjectURL(old);
+        releaseTrackedUrl(old);
         return nextUrl;
       });
       setProgress(100);
@@ -587,6 +629,16 @@ export default function Home() {
     link.href = resultUrl;
     link.download = `${sourceName.replace(/\.[^.]+$/, "")}-studio.jpg`;
     link.click();
+  }
+
+  function handleBrokenResult() {
+    if (!resultUrl) return;
+    setResultUrl((old) => {
+      releaseTrackedUrl(old);
+      return null;
+    });
+    setStatus("error");
+    setError("결과 이미지를 표시하지 못했습니다. 다시 시도하거나 페이지를 새로고침해 주세요.");
   }
 
   return (
@@ -643,7 +695,15 @@ export default function Home() {
             <span>→</span>
           </button>
           {status === "working" && <div className="progress"><i style={{ width: `${progress}%` }} /><span>첫 실행은 AI 모델 준비로 조금 더 걸릴 수 있어요 · {progress}%</span></div>}
-          {error && <p className="error">{error}</p>}
+          {error && (
+            <div className="error-box">
+              <p className="error">{error}</p>
+              <div className="error-actions">
+                <button onClick={runAi}>다시 시도</button>
+                <button onClick={() => window.location.reload()}>새로고침</button>
+              </div>
+            </div>
+          )}
         </aside>
 
         <div className="stage-panel">
@@ -652,7 +712,7 @@ export default function Home() {
             {resultUrl && <button className="download" onClick={downloadResult}>↓ 결과 저장</button>}
           </div>
           <div className={`image-stage ${plateMode ? "targeting" : ""}`} onClick={placePlate}>
-            <img className="result-image" src={resultUrl ?? sourceUrl} alt={resultUrl ? "AI 스튜디오 변환 결과" : "변환 전 차량 원본"} />
+            <img className="result-image" src={resultUrl ?? sourceUrl} alt={resultUrl ? "AI 스튜디오 변환 결과" : "변환 전 차량 원본"} onError={handleBrokenResult} />
             {resultUrl && <div className="original-layer" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={sourceUrl} alt="변환 전 원본 비교" /></div>}
             {resultUrl && <div className="compare-line" style={{ left: `${compare}%` }}><i>↔</i></div>}
             {!resultUrl && status !== "working" && <div className="ready-badge"><b>READY</b><span>왼쪽 설정을 확인하고<br />AI 변환을 시작하세요</span></div>}
