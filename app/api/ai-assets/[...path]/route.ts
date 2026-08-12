@@ -2,10 +2,13 @@ const MODEL_ASSET_BASE =
   "https://staticimgly.com/@imgly/background-removal-data/1.7.0/dist/";
 
 export async function GET(
-  _request: Request,
-  context: { params: Promise<{ path: string[] }> },
+  request: Request,
 ) {
-  const { path } = await context.params;
+  const marker = "/api/ai-assets/";
+  const pathname = new URL(request.url).pathname;
+  const encodedPath = pathname.includes(marker) ? pathname.slice(pathname.indexOf(marker) + marker.length) : "";
+  const path = encodedPath.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+  if (!path.length) return new Response("Missing asset path", { status: 400 });
   const safeParts = path.filter(
     (part) => part && part !== "." && part !== ".." && !part.includes("\\"),
   );

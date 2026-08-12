@@ -610,7 +610,7 @@ function createTransparentWallStrip(image: HTMLImageElement) {
     }
     for (let y = 0; y < canvas.height; y += 1) {
       const offset = (y * canvas.width + x) * 4;
-      const outsideBand = lastBlue < 0 || y < firstBlue - 2 || y > lastBlue + 2;
+      const outsideBand = lastBlue < 0 || y < firstBlue - 1 || y > lastBlue + 1;
       if (outsideBand) pixels[offset + 3] = 0;
     }
   }
@@ -859,7 +859,7 @@ export default function Home() {
     const sourceBlob = await response.blob();
     const { removeBackground } = await import("@imgly/background-removal");
     const cutout = await removeBackground(sourceBlob, {
-      publicPath: `${window.location.origin}/api/ai-assets/`,
+      publicPath: "https://staticimgly.com/@imgly/background-removal-data/1.7.0/dist/",
       model: "isnet_fp16",
       device: "gpu",
       proxyToWorker: false,
@@ -915,10 +915,29 @@ export default function Home() {
         setPlatePoints(detection.points.length === 4
           ? detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }))
           : []);
+        if (detection.points.length !== 4) {
+          const width = sourceImage.naturalWidth;
+          const height = sourceImage.naturalHeight;
+          setPlateCoordinates("source");
+          setPlatePoints([
+            { x: 0.39, y: 0.66 },
+            { x: 0.61, y: 0.66 },
+            { x: 0.61, y: 0.74 },
+            { x: 0.39, y: 0.74 },
+          ]);
+          setPlateStatus("skipped");
+          setPlateMessage(`번호판 후보를 불러왔습니다. 파란 앵커를 실제 번호판 모서리에 맞춰 주세요. (${width}×${height})`);
+        }
       } catch {
-        setPlateStatus("error");
-        setPlateMessage("번호판 AI를 불러오지 못해 배경만 변환했습니다.");
-        setPlatePoints([]);
+        setPlateCoordinates("source");
+        setPlatePoints([
+          { x: 0.39, y: 0.66 },
+          { x: 0.61, y: 0.66 },
+          { x: 0.61, y: 0.74 },
+          { x: 0.39, y: 0.74 },
+        ]);
+        setPlateStatus("skipped");
+        setPlateMessage("번호판 기본 영역을 불러왔습니다. 파란 앵커를 실제 번호판 모서리에 맞춰 주세요.");
       }
       const nextUrl = createTrackedUrl(cutout);
       setForegroundUrl((old) => {
@@ -1169,9 +1188,9 @@ export default function Home() {
           </div>
           <label className="label">원본 환경</label>
           <div className="scene-modes">
-            {(["auto", "studio", "outdoor"] as SceneMode[]).map((mode) => (
+            {(["auto", "studio"] as SceneMode[]).map((mode) => (
               <button key={mode} className={sceneMode === mode ? "active" : ""} onClick={() => setSceneMode(mode)}>
-                {mode === "auto" ? "자동" : mode === "studio" ? "촬영장" : "야외"}
+                {mode === "auto" ? "자동" : "촬영장"}
               </button>
             ))}
           </div>
@@ -1180,9 +1199,7 @@ export default function Home() {
               ? detectedScene
                 ? `자동 인식: ${detectedScene === "studio" ? "촬영장 · 바닥 유지" : "야외 · 오토인사이드 촬영장 적용"}`
                 : "AI 변환 시 촬영장과 야외를 자동으로 구분합니다"
-              : sceneMode === "studio"
-                ? "기존 바닥과 실제 그림자를 유지하고 벽만 교체합니다"
-                : "야외 배경과 바닥을 오토인사이드 촬영장으로 변환합니다"}
+              : "기존 바닥과 실제 그림자를 유지하고 벽만 교체합니다"}
           </p>
           <div className="wall-strip-tools">
             <label className="wall-strip-toggle">
