@@ -148,13 +148,14 @@ export async function detectFrontPlate(image: HTMLImageElement): Promise<PlateDe
       return { type: "other", points: [], score: result.score, message: "후보 위치가 전면 번호판 조건과 맞지 않아 자동 적용하지 않았습니다." };
     }
     const rearRatio = redLightRatio(image, result);
+    const points = boxPoints(result);
     if (rearRatio >= 0.005) {
-      return { type: "rear", points: [], score: result.score, message: "후면 사진으로 판별되어 번호판을 변경하지 않았습니다." };
+      return { type: "rear", points, score: result.score, message: "번호판 후보를 찾았습니다. 촬영 각도에 맞게 네 앵커를 확인해 주세요." };
     }
     if (rearRatio > 0.002) {
-      return { type: "unknown", points: [], score: result.score, message: "전면 여부가 불확실해 자동 적용하지 않았습니다. 필요하면 직접 지정해 주세요." };
+      return { type: "unknown", points, score: result.score, message: "비스듬한 번호판 후보를 찾았습니다. 네 앵커를 조정한 뒤 적용할 수 있습니다." };
     }
-    return { type: "front", points: boxPoints(result), score: result.score, message: "전면 번호판을 찾았습니다. 모서리를 드래그해 미세 조정할 수 있습니다." };
+    return { type: "front", points, score: result.score, message: "번호판을 찾았습니다. 네 앵커를 드래그해 투시 각도를 조정할 수 있습니다." };
   } finally {
     tensor.dispose();
     if (output) Object.values(output).forEach((value) => value.dispose());

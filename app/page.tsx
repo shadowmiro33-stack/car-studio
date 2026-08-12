@@ -9,6 +9,7 @@ type Ratio = "original" | "16:9" | "4:3" | "1:1";
 type SceneMode = "auto" | "studio" | "outdoor";
 type SceneKind = Exclude<SceneMode, "auto">;
 type PlateCoordinates = "source" | "canvas";
+type WallStripPlacement = { x: number; y: number; scale: number };
 
 const backdropNames: Record<Backdrop, string> = {
   blue: "블루 커브 스튜디오",
@@ -584,13 +585,58 @@ function drawImageCover(
   context.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
 }
 
+function createTransparentWallStrip(image: HTMLImageElement) {
+  const scale = Math.min(1, 2200 / image.naturalWidth);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return canvas;
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const pixels = imageData.data;
+  for (let x = 0; x < canvas.width; x += 1) {
+    let firstBlue = canvas.height;
+    let lastBlue = -1;
+    for (let y = 0; y < canvas.height; y += 1) {
+      const offset = (y * canvas.width + x) * 4;
+      const red = pixels[offset];
+      const green = pixels[offset + 1];
+      const blue = pixels[offset + 2];
+      if (blue > red * 1.18 && blue > green * 1.03 && blue > 75) {
+        firstBlue = Math.min(firstBlue, y);
+        lastBlue = Math.max(lastBlue, y);
+      }
+    }
+    for (let y = 0; y < canvas.height; y += 1) {
+      const offset = (y * canvas.width + x) * 4;
+      const outsideBand = lastBlue < 0 || y < firstBlue - 2 || y > lastBlue + 2;
+      if (outsideBand) pixels[offset + 3] = 0;
+    }
+  }
+  context.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function drawWallStrip(
+  context: CanvasRenderingContext2D,
+  strip: HTMLCanvasElement,
+  width: number,
+  height: number,
+  placement: WallStripPlacement,
+) {
+  const drawWidth = width * placement.scale;
+  const drawHeight = drawWidth * (strip.height / strip.width);
+  context.drawImage(strip, width * placement.x - drawWidth / 2, height * placement.y - drawHeight / 2, drawWidth, drawHeight);
+}
+
 export default function Home() {
   const [sourceUrl, setSourceUrl] = useState("/sample-car.jpg");
   const [sourceName, setSourceName] = useState("RTC20250929100024473_0X.jpg");
   const [foregroundUrl, setForegroundUrl] = useState<string | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [backdrop, setBackdrop] = useState<Backdrop>("blue");
-  const [ratio, setRatio] = useState<Ratio>("16:9");
+  const [ratio, setRatio] = useState<Ratio>("original");
   const [platePoints, setPlatePoints] = useState<PlatePoint[]>([]);
   const [plateCoordinates, setPlateCoordinates] = useState<PlateCoordinates>("canvas");
   const [plateMode, setPlateMode] = useState(false);
@@ -605,9 +651,14 @@ export default function Home() {
   const [detectedScene, setDetectedScene] = useState<SceneKind | null>(null);
   const [draggingCompare, setDraggingCompare] = useState(false);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [batchPreviews, setBatchPreviews] = useState<string[]>([]);
   const [batchProgress, setBatchProgress] = useState(0);
   const [batchStatus, setBatchStatus] = useState<"idle" | "working" | "done" | "error">("idle");
-  const [batchResults, setBatchResults] = useState<{ name: string; blob: Blob; plate: string }[]>([]);
+  const [batchResults, setBatchResults] = useState<{ name: string; blob: Blob; plate: string; beforeUrl: string; afterUrl: string }[]>([]);
+  const [wallStripEnabled, setWallStripEnabled] = useState(true);
+  const [wallStrip, setWallStrip] = useState<WallStripPlacement>({ x: 0.5, y: 0.14, scale: 1.04 });
+  const [draggingWallStrip, setDraggingWallStrip] = useState(false);
+  const [stageAspect, setStageAspect] = useState(16 / 9);
   const inputRef = useRef<HTMLInputElement>(null);
   const objectUrlsRef = useRef<Set<string>>(new Set());
 
@@ -634,7 +685,7 @@ export default function Home() {
     if (!foregroundUrl) return;
     void composeResult(foregroundUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, sceneMode]);
+  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, sceneMode, wallStripEnabled, wallStrip]);
 
   async function composeImage(
     foreground: string,
@@ -672,6 +723,10 @@ export default function Home() {
     } else {
       const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
       drawStudioBackdrop(context, width, height, backdrop, brandLogo);
+    }
+    if (wallStripEnabled) {
+      const stripSource = await loadImage("/autoinside-wall-strip.png");
+      drawWallStrip(context, createTransparentWallStrip(stripSource), width, height, wallStrip);
     }
     const preserveFloor = effectiveScene === "studio" && ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
     if (preserveFloor) {
@@ -766,25 +821,33 @@ export default function Home() {
     }
     context.restore();
 
-    if (overlayPoints.length === 4) {
+    const renderedPlatePoints = overlayPoints.length === 4 ? overlayPoints.map((point) => overlayCoordinates === "canvas" ? {
+      x: point.x * width,
+      y: point.y * height,
+    } : {
+      x: drawX + ((point.x * image.width - bounds.x) / bounds.width) * drawWidth,
+      y: drawY + ((point.y * image.height - bounds.y) / bounds.height) * drawHeight,
+    }) : [];
+    if (renderedPlatePoints.length === 4) {
       const logo = await loadImage("/autoinside-plate-logo.png");
-      drawPerspectivePlate(context, logo, overlayPoints.map((point) => overlayCoordinates === "canvas" ? {
-        x: point.x * width,
-        y: point.y * height,
-      } : {
-        x: drawX + ((point.x * image.width - bounds.x) / bounds.width) * drawWidth,
-        y: drawY + ((point.y * image.height - bounds.y) / bounds.height) * drawHeight,
-      }));
+      drawPerspectivePlate(context, logo, renderedPlatePoints);
     }
 
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.94));
     if (!blob) throw new Error("결과 이미지를 만들지 못했습니다.");
-    return blob;
+    return {
+      blob,
+      renderedPlatePoints: renderedPlatePoints.map((point) => ({ x: point.x / width, y: point.y / height })),
+    };
   }
 
   async function composeResult(foreground: string) {
-    const blob = await composeImage(foreground, sourceUrl);
-    const nextUrl = createTrackedUrl(blob);
+    const composed = await composeImage(foreground, sourceUrl);
+    if (plateCoordinates === "source" && composed.renderedPlatePoints.length === 4) {
+      setPlateCoordinates("canvas");
+      setPlatePoints(composed.renderedPlatePoints);
+    }
+    const nextUrl = createTrackedUrl(composed.blob);
     setResultUrl((old) => {
       releaseTrackedUrl(old);
       return nextUrl;
@@ -846,10 +909,10 @@ export default function Home() {
       try {
         const sourceImage = await loadImage(sourceUrl);
         const detection = await detectFrontPlate(sourceImage);
-        setPlateStatus(detection.type === "front" ? "done" : "skipped");
+        setPlateStatus(detection.points.length === 4 ? "done" : "skipped");
         setPlateMessage(detection.message);
         setPlateCoordinates("source");
-        setPlatePoints(detection.type === "front"
+        setPlatePoints(detection.points.length === 4
           ? detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }))
           : []);
       } catch {
@@ -889,7 +952,7 @@ export default function Home() {
     setBatchStatus("working");
     setBatchResults([]);
     setBatchProgress(0);
-    const completed: { name: string; blob: Blob; plate: string }[] = [];
+    const completed: { name: string; blob: Blob; plate: string; beforeUrl: string; afterUrl: string }[] = [];
     try {
       for (let index = 0; index < batchFiles.length; index += 1) {
         const file = batchFiles[index];
@@ -906,14 +969,21 @@ export default function Home() {
             try {
               const detection = await detectFrontPlate(sourceImage);
               plate = detection.message;
-              if (detection.type === "front") {
+              if (detection.points.length === 4) {
                 points = detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }));
               }
             } catch {
               plate = "번호판 AI를 불러오지 못해 배경만 변환";
             }
-            const blob = await composeImage(cutoutUrl, source, points, "source");
-            completed.push({ name: `${file.name.replace(/\.[^.]+$/, "")}-studio.jpg`, blob, plate });
+            const composed = await composeImage(cutoutUrl, source, points, "source");
+            const blob = composed.blob;
+            completed.push({
+              name: `${file.name.replace(/\.[^.]+$/, "")}-studio.jpg`,
+              blob,
+              plate,
+              beforeUrl: batchPreviews[index] ?? createTrackedUrl(file),
+              afterUrl: createTrackedUrl(blob),
+            });
             setBatchResults([...completed]);
           } finally {
             URL.revokeObjectURL(cutoutUrl);
@@ -947,6 +1017,7 @@ export default function Home() {
     const images = Array.from(files ?? []).filter((file) => file.type.startsWith("image/"));
     if (!images.length) return;
     setBatchFiles(images);
+    setBatchPreviews(images.map((file) => createTrackedUrl(file)));
     setBatchResults([]);
     setBatchStatus("idle");
     setBatchProgress(0);
@@ -960,9 +1031,9 @@ export default function Home() {
     try {
       const source = await loadImage(sourceUrl);
       const detection: PlateDetection = await detectFrontPlate(source);
-      setPlateStatus(detection.type === "front" ? "done" : "skipped");
+      setPlateStatus(detection.points.length === 4 ? "done" : "skipped");
       setPlateMessage(detection.message);
-      if (detection.type === "front") {
+      if (detection.points.length === 4) {
         setPlateCoordinates("source");
         setPlatePoints(detection.points.map((point) => ({ x: point.x / source.naturalWidth, y: point.y / source.naturalHeight })));
       } else {
@@ -1010,7 +1081,7 @@ export default function Home() {
   }
 
   function startCompareDrag(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!resultUrl || plateMode || draggingPlateHandle !== null) return;
+    if (!resultUrl || plateMode || draggingPlateHandle !== null || draggingWallStrip) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     setDraggingCompare(true);
     updateCompareFromPointer(event);
@@ -1019,6 +1090,16 @@ export default function Home() {
   function moveCompareDrag(event: ReactPointerEvent<HTMLDivElement>) {
     if (!draggingCompare || !resultUrl) return;
     updateCompareFromPointer(event);
+  }
+
+  function moveWallStrip(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!draggingWallStrip) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setWallStrip((current) => ({
+      ...current,
+      x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)),
+      y: Math.max(0.04, Math.min(0.45, (event.clientY - bounds.top) / bounds.height)),
+    }));
   }
 
   function handleBrokenResult() {
@@ -1103,6 +1184,20 @@ export default function Home() {
                 ? "기존 바닥과 실제 그림자를 유지하고 벽만 교체합니다"
                 : "야외 배경과 바닥을 오토인사이드 촬영장으로 변환합니다"}
           </p>
+          <div className="wall-strip-tools">
+            <label className="wall-strip-toggle">
+              <input type="checkbox" checked={wallStripEnabled} onChange={(event) => setWallStripEnabled(event.target.checked)} />
+              <span><strong>Autoinside 벽면 띠 합성</strong><small>흰 배경을 제거하고 차량 뒤 벽면에 배치합니다.</small></span>
+            </label>
+            {wallStripEnabled && (
+              <div className="wall-strip-sliders">
+                <label><span>가로 위치</span><input aria-label="벽면 띠 가로 위치" type="range" min="0" max="100" value={wallStrip.x * 100} onChange={(event) => setWallStrip((current) => ({ ...current, x: Number(event.target.value) / 100 }))} /></label>
+                <label><span>세로 위치</span><input aria-label="벽면 띠 세로 위치" type="range" min="4" max="45" value={wallStrip.y * 100} onChange={(event) => setWallStrip((current) => ({ ...current, y: Number(event.target.value) / 100 }))} /></label>
+                <label><span>크기</span><input aria-label="벽면 띠 크기" type="range" min="55" max="150" value={wallStrip.scale * 100} onChange={(event) => setWallStrip((current) => ({ ...current, scale: Number(event.target.value) / 100 }))} /></label>
+                <small>결과 화면의 파란 위치점을 드래그해도 이동합니다.</small>
+              </div>
+            )}
+          </div>
           <div className="plate-tools">
           <button className="plate-button" disabled={!resultUrl || plateStatus === "working"} onClick={runPlateAi}>
             <span>AI</span><span><strong>전면 번호판 자동 교체</strong><small>전면으로 확실할 때만 Autoinside 번호판 적용</small></span>
@@ -1138,15 +1233,26 @@ export default function Home() {
           </div>
           <div
             className={`image-stage ${plateMode ? "targeting" : ""} ${resultUrl ? "comparing" : ""} ${draggingCompare ? "dragging" : ""}`}
+            style={{ aspectRatio: stageAspect }}
             onClick={placePlate}
             onPointerDown={startCompareDrag}
-            onPointerMove={moveCompareDrag}
-            onPointerUp={() => setDraggingCompare(false)}
-            onPointerCancel={() => setDraggingCompare(false)}
+            onPointerMove={(event) => { moveCompareDrag(event); moveWallStrip(event); }}
+            onPointerUp={() => { setDraggingCompare(false); setDraggingWallStrip(false); }}
+            onPointerCancel={() => { setDraggingCompare(false); setDraggingWallStrip(false); }}
           >
-            <img className="result-image" src={resultUrl ?? sourceUrl} alt={resultUrl ? "AI 스튜디오 변환 결과" : "변환 전 차량 원본"} onError={handleBrokenResult} />
+            <img className="result-image" src={resultUrl ?? sourceUrl} alt={resultUrl ? "AI 스튜디오 변환 결과" : "변환 전 차량 원본"} onLoad={(event) => { const image = event.currentTarget; if (image.naturalWidth && image.naturalHeight) setStageAspect(image.naturalWidth / image.naturalHeight); }} onError={handleBrokenResult} />
             {resultUrl && <div className="original-layer" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={sourceUrl} alt="변환 전 원본 비교" /></div>}
             {resultUrl && <div className="compare-line" style={{ left: `${compare}%` }}><i>↔</i></div>}
+            {resultUrl && wallStripEnabled && (
+              <button
+                className="wall-strip-anchor"
+                aria-label="Autoinside 벽면 띠 위치 이동"
+                style={{ left: `${wallStrip.x * 100}%`, top: `${wallStrip.y * 100}%` }}
+                onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); setDraggingCompare(false); setDraggingWallStrip(true); }}
+                onPointerUp={() => setDraggingWallStrip(false)}
+                onPointerCancel={() => setDraggingWallStrip(false)}
+              >띠</button>
+            )}
             {!resultUrl && status !== "working" && <div className="ready-badge"><b>READY</b><span>왼쪽 설정을 확인하고<br />AI 변환을 시작하세요</span></div>}
             {status === "working" && <div className="processing-overlay"><div className="scanner" /><strong>차량 윤곽을 찾고 있습니다</strong><span>창문, 휠, 그림자를 섬세하게 분리하는 중</span></div>}
             {resultUrl && platePoints.length === 4 && platePoints.map((point, index) => (
@@ -1167,6 +1273,33 @@ export default function Home() {
           <div className="stage-footer"><span>원본 차량의 형태와 색상은 유지됩니다</span><span>{ratio === "original" ? "원본 비율" : ratio} · 고화질 JPG</span></div>
         </div>
       </section>
+
+      {batchFiles.length > 1 && (
+        <section className="batch-review" aria-label="여러 사진 변환 비교">
+          <div className="batch-review-head">
+            <div><p className="eyebrow">BATCH BEFORE &amp; AFTER</p><h2>사진별 비포·애프터</h2></div>
+            <div className="batch-summary"><strong>{batchResults.length}</strong><span>/ {batchFiles.length}장 완료</span></div>
+          </div>
+          <div className="batch-review-grid">
+            {batchFiles.map((file, index) => {
+              const result = batchResults[index];
+              return (
+                <article className="batch-card" key={`${file.name}-${index}`}>
+                  <div className="batch-card-images">
+                    <figure><span>BEFORE</span><img src={batchPreviews[index]} alt={`${file.name} 원본`} /></figure>
+                    <figure className={!result ? "pending" : ""}>
+                      <span>AFTER</span>
+                      {result ? <img src={result.afterUrl} alt={`${file.name} 변환 결과`} /> : <div className="batch-placeholder">{batchStatus === "working" ? "변환 대기 중" : "전체 사진 원클릭 변환을 눌러주세요"}</div>}
+                    </figure>
+                  </div>
+                  <div className="batch-card-meta"><strong>{file.name}</strong><small>{result?.plate ?? "원본 준비됨"}</small></div>
+                </article>
+              );
+            })}
+          </div>
+          {batchResults.length > 0 && <button className="batch-review-download" onClick={downloadBatch}>완료 결과 ZIP 다운로드 · {batchResults.length}장</button>}
+        </section>
+      )}
 
       <section className="how-it-works">
         <p className="eyebrow">HOW IT WORKS</p>
