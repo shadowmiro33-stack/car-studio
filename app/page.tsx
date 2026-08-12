@@ -4,14 +4,13 @@ import { ChangeEvent, DragEvent, MouseEvent, PointerEvent as ReactPointerEvent, 
 import { detectFrontPlate, drawPerspectivePlate, type PlateDetection, type PlatePoint } from "./plate-ai";
 import JSZip from "jszip";
 
-type Backdrop = "blue" | "studio" | "warm" | "graphite";
+type Backdrop = "studio" | "warm" | "graphite";
 type Ratio = "original" | "16:9" | "4:3" | "1:1";
 type SceneKind = "studio";
 type PlateCoordinates = "source" | "canvas";
 type WallStripPlacement = { x: number; y: number; scale: number };
 
 const backdropNames: Record<Backdrop, string> = {
-  blue: "블루 커브 스튜디오",
   studio: "화이트 스튜디오",
   warm: "웜그레이 쇼룸",
   graphite: "그래파이트 스튜디오",
@@ -401,69 +400,7 @@ function drawStudioBackdrop(
   width: number,
   height: number,
   backdrop: Backdrop,
-  brandLogo?: HTMLImageElement,
 ) {
-  if (backdrop === "blue") {
-    const wall = context.createLinearGradient(0, 0, 0, height);
-    wall.addColorStop(0, "#f8f9fa");
-    wall.addColorStop(0.58, "#e7eaed");
-    wall.addColorStop(0.7, "#cfd4d8");
-    wall.addColorStop(1, "#aeb5ba");
-    context.fillStyle = wall;
-    context.fillRect(0, 0, width, height);
-
-    const wallGlow = context.createRadialGradient(width * 0.5, height * 0.38, 0, width * 0.5, height * 0.38, width * 0.62);
-    wallGlow.addColorStop(0, "rgba(255,255,255,.98)");
-    wallGlow.addColorStop(0.68, "rgba(255,255,255,.28)");
-    wallGlow.addColorStop(1, "rgba(255,255,255,0)");
-    context.fillStyle = wallGlow;
-    context.fillRect(0, 0, width, height);
-
-    const bandTop = height * 0.09;
-    const bandBottom = height * 0.175;
-    context.save();
-    context.beginPath();
-    context.moveTo(0, bandTop * 0.72);
-    context.quadraticCurveTo(width * 0.5, bandTop * 1.34, width, bandTop * 0.72);
-    context.lineTo(width, bandBottom * 0.86);
-    context.quadraticCurveTo(width * 0.5, bandBottom * 1.12, 0, bandBottom * 0.86);
-    context.closePath();
-    const band = context.createLinearGradient(0, 0, width, 0);
-    band.addColorStop(0, "#1559e8");
-    band.addColorStop(0.5, "#3179ff");
-    band.addColorStop(1, "#1559e8");
-    context.fillStyle = band;
-    context.shadowColor = "rgba(29,100,255,.35)";
-    context.shadowBlur = Math.max(12, height * 0.018);
-    context.fill();
-    context.restore();
-
-    if (brandLogo) {
-      const logoWidth = width * 0.1;
-      const logoHeight = logoWidth * (brandLogo.height / brandLogo.width);
-      context.save();
-      context.globalAlpha = 0.96;
-      context.drawImage(brandLogo, width * 0.5 - logoWidth / 2, height * 0.025, logoWidth, logoHeight);
-      context.restore();
-    }
-
-    const floor = context.createLinearGradient(0, height * 0.64, 0, height);
-    floor.addColorStop(0, "rgba(255,255,255,0)");
-    floor.addColorStop(0.18, "rgba(230,233,235,.8)");
-    floor.addColorStop(1, "rgba(151,158,163,.82)");
-    context.fillStyle = floor;
-    context.fillRect(0, height * 0.62, width, height * 0.38);
-
-    context.save();
-    context.strokeStyle = "rgba(63,70,76,.34)";
-    context.lineWidth = Math.max(1, width * 0.0014);
-    context.beginPath();
-    context.ellipse(width * 0.5, height * 0.835, width * 0.39, height * 0.12, 0, 0, Math.PI * 2);
-    context.stroke();
-    context.restore();
-    return;
-  }
-
   const palettes = {
     studio: ["#fbfbfa", "#e7e8e6", "#cfd2cf"],
     warm: ["#f3eee7", "#d7cec2", "#b8aea3"],
@@ -569,11 +506,11 @@ function drawWallStrip(
 }
 
 export default function Home() {
-  const [sourceUrl, setSourceUrl] = useState("/sample-car.jpg");
-  const [sourceName, setSourceName] = useState("RTC20250929100024473_0X.jpg");
+  const [sourceUrl, setSourceUrl] = useState<string | null>(null);
+  const [sourceName, setSourceName] = useState("");
   const [foregroundUrl, setForegroundUrl] = useState<string | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
-  const [backdrop, setBackdrop] = useState<Backdrop>("blue");
+  const [backdrop, setBackdrop] = useState<Backdrop>("studio");
   const [ratio, setRatio] = useState<Ratio>("original");
   const [platePoints, setPlatePoints] = useState<PlatePoint[]>([]);
   const [plateCoordinates, setPlateCoordinates] = useState<PlateCoordinates>("canvas");
@@ -657,8 +594,7 @@ export default function Home() {
     setDetectedScene("studio");
     const effectiveScene: SceneKind = "studio";
     const renderBackdrop: Backdrop = backdrop;
-    const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
-    drawStudioBackdrop(context, width, height, backdrop, brandLogo);
+    drawStudioBackdrop(context, width, height, backdrop);
     if (wallStripEnabled) {
       const stripSource = await loadImage("/autoinside-wall-strip.png");
       drawWallStrip(context, createTransparentWallStrip(stripSource), width, height, wallStrip);
@@ -689,7 +625,7 @@ export default function Home() {
       drawWidth = bounds.width * vehicleScale;
       drawHeight = bounds.height * vehicleScale;
       drawX = (width - drawWidth) / 2;
-      floorY = height * (renderBackdrop === "blue" ? 0.855 : 0.85);
+      floorY = height * 0.85;
       drawY = floorY - drawHeight;
     }
     const bottomProfile = getBottomProfile(image, bounds);
@@ -818,6 +754,7 @@ export default function Home() {
   }
 
   async function runAi() {
+    if (!sourceUrl) return;
     setStatus("working");
     setError("");
     setProgress(4);
@@ -964,6 +901,7 @@ export default function Home() {
   }
 
   async function runPlateAi() {
+    if (!sourceUrl) return;
     setPlateStatus("working");
     setPlateMode(false);
     setPlateMessage("번호판 AI 모델을 준비하고 있습니다. 첫 실행은 조금 걸릴 수 있습니다.");
@@ -1084,7 +1022,7 @@ export default function Home() {
             <span>클릭하거나 파일을 끌어오세요</span>
           </button>
           <input ref={inputRef} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={(event: ChangeEvent<HTMLInputElement>) => acceptFiles(event.target.files ?? undefined)} />
-          <div className="file-row"><span className="file-thumb"><img src={sourceUrl} alt="선택한 차량" /></span><span><strong>{sourceName}</strong><small>원본 이미지 준비됨</small></span><b>✓</b></div>
+          {sourceUrl && <div className="file-row"><span className="file-thumb"><img src={sourceUrl} alt="선택한 차량" /></span><span><strong>{sourceName}</strong><small>원본 이미지 준비됨</small></span><b>✓</b></div>}
 
           {batchFiles.length > 1 && (
             <div className="batch-panel">
@@ -1142,7 +1080,7 @@ export default function Home() {
           {platePoints.length === 4 && <button className="text-button" onClick={() => { setPlatePoints([]); setPlateStatus("idle"); setPlateMessage("번호판 교체를 해제했습니다."); }}>번호판 교체 해제</button>}
           </div>
 
-          <button className="primary" disabled={status === "working"} onClick={runAi}>
+          <button className="primary" disabled={!sourceUrl || status === "working"} onClick={runAi}>
             {status === "working" ? "배경 제거·촬영장 합성·번호판 판정 중…" : resultUrl ? "한 번에 다시 변환하기" : "한 번에 배경 날리고 변환"}
             <span>→</span>
           </button>
@@ -1175,8 +1113,8 @@ export default function Home() {
             onPointerUp={() => { setDraggingCompare(false); setDraggingWallStrip(false); }}
             onPointerCancel={() => { setDraggingCompare(false); setDraggingWallStrip(false); }}
           >
-            <img className="result-image" src={resultUrl ?? sourceUrl} alt={resultUrl ? "AI 스튜디오 변환 결과" : "변환 전 차량 원본"} onLoad={(event) => { const image = event.currentTarget; if (image.naturalWidth && image.naturalHeight) setStageAspect(image.naturalWidth / image.naturalHeight); }} onError={handleBrokenResult} />
-            {resultUrl && <div className="original-layer" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={sourceUrl} alt="변환 전 원본 비교" /></div>}
+            {sourceUrl && <img className="result-image" src={resultUrl ?? sourceUrl} alt={resultUrl ? "AI 스튜디오 변환 결과" : "변환 전 차량 원본"} onLoad={(event) => { const image = event.currentTarget; if (image.naturalWidth && image.naturalHeight) setStageAspect(image.naturalWidth / image.naturalHeight); }} onError={handleBrokenResult} />}
+            {resultUrl && sourceUrl && <div className="original-layer" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={sourceUrl} alt="변환 전 원본 비교" /></div>}
             {resultUrl && <div className="compare-line" style={{ left: `${compare}%` }}><i>↔</i></div>}
             {resultUrl && wallStripEnabled && (
               <button
@@ -1188,7 +1126,8 @@ export default function Home() {
                 onPointerCancel={() => setDraggingWallStrip(false)}
               >띠</button>
             )}
-            {!resultUrl && status !== "working" && <div className="ready-badge"><b>READY</b><span>왼쪽 설정을 확인하고<br />AI 변환을 시작하세요</span></div>}
+            {!sourceUrl && <button className="empty-stage" onClick={() => inputRef.current?.click()}><b>사진을 올려주세요</b><span>JPG, PNG 파일을 선택하거나 화면에 끌어오세요</span></button>}
+            {sourceUrl && !resultUrl && status !== "working" && <div className="ready-badge"><b>READY</b><span>왼쪽 설정을 확인하고<br />AI 변환을 시작하세요</span></div>}
             {status === "working" && <div className="processing-overlay"><div className="scanner" /><strong>차량 윤곽을 찾고 있습니다</strong><span>창문, 휠, 그림자를 섬세하게 분리하는 중</span></div>}
             {resultUrl && platePoints.length === 4 && platePoints.map((point, index) => (
               <button
