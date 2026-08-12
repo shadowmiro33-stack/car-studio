@@ -90,6 +90,87 @@ function isPlausiblePlateBox(plate: PlateBox, width: number, height: number) {
     && plate.top >= height * 0.3 && plate.bottom <= height * (redDealer ? 0.97 : 0.88);
 }
 
+function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
+  const width = 480;
+  const height = Math.max(1, Math.round(width * image.naturalHeight / image.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return null;
+  context.drawImage(image, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const visited = new Uint8Array(width * height);
+  let best: { area: number; left: number; top: number; right: number; bottom: number } | null = null;
+  const yStart = Math.floor(height * 0.44);
+  for (let y = yStart; y < height * 0.92; y += 1) {
+    for (let x = Math.floor(width * 0.08); x < width * 0.92; x += 1) {
+      const start = y * width + x;
+      if (visited[start]) continue;
+      const offset = start * 4;
+      const red = pixels[offset];
+      const green = pixels[offset + 1];
+      const blue = pixels[offset + 2];
+      if (!(red > 85 && red > green * 1.28 && red > blue * 1.22)) continue;
+      const queue = [start];
+      visited[start] = 1;
+      let cursor = 0;
+      let area = 0;
+      let left = x;
+      let right = x;
+      let top = y;
+      let bottom = y;
+      while (cursor < queue.length) {
+        const index = queue[cursor++];
+        const px = index % width;
+        const py = Math.floor(index / width);
+        area += 1;
+        left = Math.min(left, px); right = Math.max(right, px);
+        top = Math.min(top, py); bottom = Math.max(bottom, py);
+        for (const neighbor of [index - 1, index + 1, index - width, index + width]) {
+          if (neighbor < 0 || neighbor >= width * height || visited[neighbor]) continue;
+          const nx = neighbor % width;
+          const ny = Math.floor(neighbor / width);
+          if (Math.abs(nx - px) + Math.abs(ny - py) !== 1) continue;
+          const no = neighbor * 4;
+          const nr = pixels[no], ng = pixels[no + 1], nb = pixels[no + 2];
+          if (nr > 85 && nr > ng * 1.28 && nr > nb * 1.22) {
+            visited[neighbor] = 1;
+            queue.push(neighbor);
+          }
+        }
+      }
+      const componentWidth = right - left + 1;
+      const componentHeight = bottom - top + 1;
+      const aspect = componentWidth / Math.max(1, componentHeight);
+      const centerRatio = ((left + right) / 2) / width;
+      const widthRatio = componentWidth / width;
+      const heightRatio = componentHeight / height;
+      const topRatio = top / height;
+      if (
+        area > 90
+        && aspect >= 1.35 && aspect <= 6.5
+        && centerRatio >= 0.3 && centerRatio <= 0.7
+        && topRatio >= 0.58
+        && widthRatio >= 0.055 && widthRatio <= 0.34
+        && heightRatio >= 0.018 && heightRatio <= 0.13
+        && (!best || area > best.area)
+      ) best = { area, left, top, right, bottom };
+    }
+  }
+  if (!best) return null;
+  const padX = Math.max(2, (best.right - best.left) * 0.04);
+  const padY = Math.max(2, (best.bottom - best.top) * 0.08);
+  return {
+    source: "red-dealer",
+    left: Math.max(0, (best.left - padX) / width * image.naturalWidth),
+    top: Math.max(0, (best.top - padY) / height * image.naturalHeight),
+    right: Math.min(image.naturalWidth, (best.right + padX) / width * image.naturalWidth),
+    bottom: Math.min(image.naturalHeight, (best.bottom + padY) / height * image.naturalHeight),
+    score: Math.min(0.99, 0.65 + best.area / (width * height) * 8),
+  };
+}
+
 function redLightRatio(image: HTMLImageElement, excludedPlate: PlateBox) {
   const width = 320;
   const height = 192;
@@ -134,13 +215,23 @@ function boxPoints(box: PlateBox) {
 }
 
 export async function detectFrontPlate(image: HTMLImageElement): Promise<PlateDetection> {
+  const redResult = findRedDealerPlate(image);
+  if (redResult && isPlausiblePlateBox(redResult, image.naturalWidth, image.naturalHeight)) {
+    return {
+      type: "front",
+      points: boxPoints(redResult),
+      score: redResult.score,
+      message: "전면 딜러 플레이트를 감지했습니다. 실제 크기와 위치에 맞춰 교체합니다.",
+    };
+  }
   const ort = await import("onnxruntime-web");
   const session = await getDetectorSession();
   const tensor = imageToTensor(ort, image);
   let output: Record<string, import("onnxruntime-web").Tensor> | null = null;
   try {
     output = await session.run({ pixel_values: tensor });
-    const result = topPlateBox(output, image.naturalWidth, image.naturalHeight);
+    const modelResult = topPlateBox(output, image.naturalWidth, image.naturalHeight);
+    const result = modelResult;
     if (!result || result.score < 0.08) {
       return { type: "other", points: [], score: result?.score ?? null, message: "전면 번호판을 확실하게 찾지 못했습니다. 네 모서리를 직접 지정할 수 있습니다." };
     }

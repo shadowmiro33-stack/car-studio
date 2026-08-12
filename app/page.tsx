@@ -6,8 +6,7 @@ import JSZip from "jszip";
 
 type Backdrop = "blue" | "studio" | "warm" | "graphite";
 type Ratio = "original" | "16:9" | "4:3" | "1:1";
-type SceneMode = "auto" | "studio" | "outdoor";
-type SceneKind = Exclude<SceneMode, "auto">;
+type SceneKind = "studio";
 type PlateCoordinates = "source" | "canvas";
 type WallStripPlacement = { x: number; y: number; scale: number };
 
@@ -167,54 +166,6 @@ function estimateLight(image: HTMLImageElement, bounds: SubjectBounds): LightEst
   };
 }
 
-function detectScene(source: HTMLImageElement, foreground: HTMLImageElement): SceneKind {
-  const analysisWidth = 360;
-  const analysisHeight = Math.max(1, Math.round(analysisWidth * (source.height / source.width)));
-  const sourceCanvas = document.createElement("canvas");
-  const maskCanvas = document.createElement("canvas");
-  sourceCanvas.width = maskCanvas.width = analysisWidth;
-  sourceCanvas.height = maskCanvas.height = analysisHeight;
-  const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
-  const maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
-  if (!sourceContext || !maskContext) return "outdoor";
-  sourceContext.drawImage(source, 0, 0, analysisWidth, analysisHeight);
-  maskContext.drawImage(foreground, 0, 0, analysisWidth, analysisHeight);
-  const sourcePixels = sourceContext.getImageData(0, 0, analysisWidth, analysisHeight).data;
-  const maskPixels = maskContext.getImageData(0, 0, analysisWidth, analysisHeight).data;
-  let saturationTotal = 0;
-  let greenPixels = 0;
-  let textureTotal = 0;
-  let samples = 0;
-
-  for (let y = 2; y < analysisHeight * 0.62; y += 3) {
-    for (let x = 2; x < analysisWidth - 3; x += 3) {
-      const offset = (Math.floor(y) * analysisWidth + x) * 4;
-      if (maskPixels[offset + 3] > 48) continue;
-      const r = sourcePixels[offset];
-      const g = sourcePixels[offset + 1];
-      const b = sourcePixels[offset + 2];
-      const maximum = Math.max(r, g, b);
-      const minimum = Math.min(r, g, b);
-      saturationTotal += maximum ? (maximum - minimum) / maximum : 0;
-      if (g > r * 1.08 && g > b * 1.06 && g > 55) greenPixels += 1;
-      const right = offset + 12;
-      const below = offset + analysisWidth * 4 * 3;
-      const luminance = r * 0.2126 + g * 0.7152 + b * 0.0722;
-      const rightLuminance = sourcePixels[right] * 0.2126 + sourcePixels[right + 1] * 0.7152 + sourcePixels[right + 2] * 0.0722;
-      const belowLuminance = sourcePixels[below] * 0.2126 + sourcePixels[below + 1] * 0.7152 + sourcePixels[below + 2] * 0.0722;
-      textureTotal += (Math.abs(luminance - rightLuminance) + Math.abs(luminance - belowLuminance)) / 2;
-      samples += 1;
-    }
-  }
-
-  if (samples < 80) return "outdoor";
-  const saturation = saturationTotal / samples;
-  const greenRatio = greenPixels / samples;
-  const texture = textureTotal / samples;
-  const outdoorScore = saturation * 2.1 + greenRatio * 1.6 + Math.max(0, texture - 8) / 24;
-  return outdoorScore >= 0.72 ? "outdoor" : "studio";
-}
-
 function estimateFloorHorizon(source: HTMLImageElement, foreground: HTMLImageElement) {
   const width = 420;
   const height = Math.max(1, Math.round(width * (source.height / source.width)));
@@ -253,59 +204,6 @@ function estimateFloorHorizon(source: HTMLImageElement, foreground: HTMLImageEle
   }
 
   return Math.max(0.56, Math.min(0.8, bestRow / height));
-}
-
-function createStudioGradedVehicle(image: HTMLImageElement, bounds: SubjectBounds) {
-  const scale = Math.min(1, 1200 / Math.max(bounds.width, bounds.height));
-  const width = Math.max(1, Math.round(bounds.width * scale));
-  const height = Math.max(1, Math.round(bounds.height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) return canvas;
-  context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, width, height);
-  const imageData = context.getImageData(0, 0, width, height);
-  const pixels = imageData.data;
-  const original = new Uint8ClampedArray(pixels);
-  const radius = Math.max(10, Math.round(width * 0.028));
-  const samples = [[-radius, 0], [radius, 0], [0, -radius], [0, radius], [-radius, -radius], [radius, -radius], [-radius, radius], [radius, radius]];
-
-  for (let y = 0; y < height * 0.62; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const offset = (y * width + x) * 4;
-      if (original[offset + 3] < 96) continue;
-      const r = original[offset];
-      const g = original[offset + 1];
-      const b = original[offset + 2];
-      const luminance = r * 0.2126 + g * 0.7152 + b * 0.0722;
-      if (luminance < 224) continue;
-      let ringLight = 0;
-      let ringSamples = 0;
-      for (const [dx, dy] of samples) {
-        const sampleX = x + dx;
-        const sampleY = y + dy;
-        if (sampleX < 0 || sampleX >= width || sampleY < 0 || sampleY >= height) continue;
-        const sampleOffset = (sampleY * width + sampleX) * 4;
-        if (original[sampleOffset + 3] < 96) continue;
-        ringLight += original[sampleOffset] * 0.2126 + original[sampleOffset + 1] * 0.7152 + original[sampleOffset + 2] * 0.0722;
-        ringSamples += 1;
-      }
-      if (ringSamples < 3) continue;
-      const neighborhood = ringLight / ringSamples;
-      const excess = luminance - neighborhood;
-      if (excess < 30) continue;
-      const strength = Math.min(0.82, (excess - 30) / 85);
-      const targetLight = Math.min(luminance, neighborhood + 24);
-      const factor = (luminance * (1 - strength) + targetLight * strength) / luminance;
-      pixels[offset] = Math.round(r * factor);
-      pixels[offset + 1] = Math.round(g * factor);
-      pixels[offset + 2] = Math.round(b * factor);
-    }
-  }
-
-  context.putImageData(imageData, 0, 0);
-  return canvas;
 }
 
 function drawProjectedShadow(
@@ -358,38 +256,49 @@ function drawProjectedShadow(
   context.restore();
 }
 
-function drawDiffuseStudioShadow(
-  context: CanvasRenderingContext2D,
-  drawX: number,
-  drawWidth: number,
-  drawHeight: number,
-  floorY: number,
-  canvasWidth: number,
-  canvasHeight: number,
-) {
-  const layers = [
-    { x: 0.5, y: 0.018, radiusX: 0.39, radiusY: 0.025, blur: 0.0065, color: "rgba(28,31,34,.18)" },
-    { x: 0.49, y: 0.034, radiusX: 0.31, radiusY: 0.013, blur: 0.0034, color: "rgba(18,21,23,.3)" },
-    { x: 0.48, y: 0.044, radiusX: 0.235, radiusY: 0.0065, blur: 0.0018, color: "rgba(10,12,14,.38)" },
-  ];
-
-  for (const layer of layers) {
-    context.save();
-    context.filter = `blur(${Math.max(2, canvasWidth * layer.blur)}px)`;
-    context.fillStyle = layer.color;
-    context.beginPath();
-    context.ellipse(
-      drawX + drawWidth * layer.x,
-      floorY - drawHeight * layer.y,
-      drawWidth * layer.radiusX,
-      Math.max(3, canvasHeight * layer.radiusY),
-      0,
-      0,
-      Math.PI * 2,
-    );
-    context.fill();
-    context.restore();
+function largestAlphaComponent(pixels: Uint8ClampedArray, width: number, height: number) {
+  const step = Math.max(1, Math.ceil(Math.max(width, height) / 620));
+  const gridWidth = Math.ceil(width / step);
+  const gridHeight = Math.ceil(height / step);
+  const mask = new Uint8Array(gridWidth * gridHeight);
+  for (let gy = 0; gy < gridHeight; gy += 1) {
+    for (let gx = 0; gx < gridWidth; gx += 1) {
+      let solid = 0;
+      for (let y = gy * step; y < Math.min(height, (gy + 1) * step); y += 1) {
+        for (let x = gx * step; x < Math.min(width, (gx + 1) * step); x += 1) {
+          if (pixels[(y * width + x) * 4 + 3] > 160) solid += 1;
+        }
+      }
+      if (solid >= Math.max(1, step * step * 0.3)) mask[gy * gridWidth + gx] = 1;
+    }
   }
+  const visited = new Uint8Array(mask.length);
+  let largest: number[] = [];
+  for (let start = 0; start < mask.length; start += 1) {
+    if (!mask[start] || visited[start]) continue;
+    const queue = [start];
+    const component: number[] = [];
+    visited[start] = 1;
+    let cursor = 0;
+    while (cursor < queue.length) {
+      const index = queue[cursor++];
+      component.push(index);
+      const x = index % gridWidth;
+      const y = Math.floor(index / gridWidth);
+      for (const next of [index - 1, index + 1, index - gridWidth, index + gridWidth]) {
+        if (next < 0 || next >= mask.length || visited[next] || !mask[next]) continue;
+        const nx = next % gridWidth;
+        const ny = Math.floor(next / gridWidth);
+        if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+        visited[next] = 1;
+        queue.push(next);
+      }
+    }
+    if (component.length > largest.length) largest = component;
+  }
+  const keep = new Uint8Array(mask.length);
+  largest.forEach((index) => { keep[index] = 1; });
+  return { keep, step, gridWidth };
 }
 
 async function refineCutout(blob: Blob): Promise<Blob> {
@@ -407,6 +316,7 @@ async function refineCutout(blob: Blob): Promise<Blob> {
     const original = new Uint8ClampedArray(pixels);
     const width = canvas.width;
     const height = canvas.height;
+    const component = largestAlphaComponent(original, width, height);
     let minX = width;
     let maxX = 0;
     let minY = height;
@@ -431,6 +341,11 @@ async function refineCutout(blob: Blob): Promise<Blob> {
       for (let x = 0; x < width; x += 1) {
         const offset = (y * width + x) * 4;
         const alpha = original[offset + 3];
+        const componentIndex = Math.floor(y / component.step) * component.gridWidth + Math.floor(x / component.step);
+        if (!component.keep[componentIndex]) {
+          pixels[offset + 3] = 0;
+          continue;
+        }
         if (x < cleanupLeft || x > cleanupRight || y < cleanupTop || y > cleanupBottom) {
           pixels[offset + 3] = 0;
           continue;
@@ -670,7 +585,6 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<"idle" | "working" | "done" | "error">("idle");
   const [error, setError] = useState("");
-  const [sceneMode, setSceneMode] = useState<SceneMode>("auto");
   const [detectedScene, setDetectedScene] = useState<SceneKind | null>(null);
   const [draggingCompare, setDraggingCompare] = useState(false);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
@@ -712,7 +626,7 @@ export default function Home() {
     const timer = window.setTimeout(() => { void composeResult(foregroundUrl, sequence); }, 140);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, sceneMode, wallStripEnabled, wallStrip]);
+  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, wallStripEnabled, wallStrip]);
 
   async function composeImage(
     foreground: string,
@@ -740,22 +654,16 @@ export default function Home() {
     const context = canvas.getContext("2d");
     if (!context) return;
 
-    const detected = detectScene(sourceImage, image);
-    setDetectedScene(detected);
-    const effectiveScene = sceneMode === "auto" ? detected : sceneMode;
-    const renderBackdrop: Backdrop = effectiveScene === "outdoor" ? "blue" : backdrop;
-    if (effectiveScene === "outdoor") {
-      const outdoorStudio = await loadImage("/autoinside-outdoor-studio.png");
-      drawImageCover(context, outdoorStudio, width, height);
-    } else {
-      const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
-      drawStudioBackdrop(context, width, height, backdrop, brandLogo);
-    }
+    setDetectedScene("studio");
+    const effectiveScene: SceneKind = "studio";
+    const renderBackdrop: Backdrop = backdrop;
+    const brandLogo = backdrop === "blue" ? await loadImage("/autoinside-logo.png") : undefined;
+    drawStudioBackdrop(context, width, height, backdrop, brandLogo);
     if (wallStripEnabled) {
       const stripSource = await loadImage("/autoinside-wall-strip.png");
       drawWallStrip(context, createTransparentWallStrip(stripSource), width, height, wallStrip);
     }
-    const preserveFloor = effectiveScene === "studio" && ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
+    const preserveFloor = ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
     if (preserveFloor) {
       const floorHorizon = estimateFloorHorizon(sourceImage, image);
       restoreOriginalFloor(context, sourceImage, width, height, floorHorizon);
@@ -767,16 +675,7 @@ export default function Home() {
     let drawX: number;
     let drawY: number;
     let floorY: number;
-    if (effectiveScene === "outdoor") {
-      const maxVehicleWidth = width * 0.64;
-      const maxVehicleHeight = height * 0.54;
-      const vehicleScale = Math.min(maxVehicleWidth / bounds.width, maxVehicleHeight / bounds.height);
-      drawWidth = bounds.width * vehicleScale;
-      drawHeight = bounds.height * vehicleScale;
-      drawX = (width - drawWidth) / 2;
-      floorY = height * 0.825;
-      drawY = floorY - drawHeight;
-    } else if (ratio === "original") {
+    if (ratio === "original") {
       const originalScale = width / image.width;
       drawWidth = bounds.width * originalScale;
       drawHeight = bounds.height * originalScale;
@@ -794,11 +693,7 @@ export default function Home() {
       drawY = floorY - drawHeight;
     }
     const bottomProfile = getBottomProfile(image, bounds);
-    const studioVehicle = effectiveScene === "outdoor" ? createStudioGradedVehicle(image, bounds) : null;
-
-    if (!preserveFloor && effectiveScene === "outdoor") {
-      drawDiffuseStudioShadow(context, drawX, drawWidth, drawHeight, floorY, width, height);
-    } else if (!preserveFloor) {
+    if (!preserveFloor) {
       drawProjectedShadow(
         context,
         image,
@@ -814,7 +709,7 @@ export default function Home() {
       );
     }
 
-    if (!preserveFloor && effectiveScene !== "outdoor" && bottomProfile.length > 1) {
+    if (!preserveFloor && bottomProfile.length > 1) {
       const first = bottomProfile[0];
       context.save();
       context.filter = `blur(${Math.max(1.5, width * 0.0012)}px)`;
@@ -836,16 +731,10 @@ export default function Home() {
     }
 
     context.save();
-    context.filter = effectiveScene === "outdoor"
-      ? "drop-shadow(0 1px 1px rgba(0,0,0,.18)) brightness(1.07) contrast(.94) saturate(.86)"
-      : renderBackdrop === "graphite"
-        ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
-        : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
-    if (studioVehicle) {
-      context.drawImage(studioVehicle, 0, 0, studioVehicle.width, studioVehicle.height, drawX, drawY, drawWidth, drawHeight);
-    } else {
-      context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
-    }
+    context.filter = renderBackdrop === "graphite"
+      ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
+      : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
+    context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
     context.restore();
 
     const renderedPlatePoints = overlayPoints.length === 4 ? overlayPoints.map((point) => overlayCoordinates === "canvas" ? {
@@ -949,28 +838,14 @@ export default function Home() {
           setPlateStatus("skipped");
           setPlateMessage("후면 번호판은 원본을 유지합니다.");
         } else if (detection.points.length !== 4) {
-          const width = sourceImage.naturalWidth;
-          const height = sourceImage.naturalHeight;
-          setPlateCoordinates("source");
-          setPlatePoints([
-            { x: 0.39, y: 0.66 },
-            { x: 0.61, y: 0.66 },
-            { x: 0.61, y: 0.74 },
-            { x: 0.39, y: 0.74 },
-          ]);
+          setPlatePoints([]);
           setPlateStatus("skipped");
-          setPlateMessage(`번호판 후보를 불러왔습니다. 파란 앵커를 실제 번호판 모서리에 맞춰 주세요. (${width}×${height})`);
+          setPlateMessage("번호판을 확실히 검출하지 못했습니다. 자동 합성하지 않고 검수 대상으로 남겼습니다.");
         }
       } catch {
-        setPlateCoordinates("source");
-        setPlatePoints([
-          { x: 0.39, y: 0.66 },
-          { x: 0.61, y: 0.66 },
-          { x: 0.61, y: 0.74 },
-          { x: 0.39, y: 0.74 },
-        ]);
+        setPlatePoints([]);
         setPlateStatus("skipped");
-        setPlateMessage("번호판 기본 영역을 불러왔습니다. 파란 앵커를 실제 번호판 모서리에 맞춰 주세요.");
+        setPlateMessage("번호판 검출 오류로 자동 합성하지 않았습니다. 직접 지정 기능을 사용해 주세요.");
       }
       const nextUrl = createTrackedUrl(cutout);
       setForegroundUrl((old) => {
@@ -1024,12 +899,10 @@ export default function Home() {
               if (detection.points.length === 4 && detection.type !== "rear") {
                 points = detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }));
               } else if (detection.type !== "rear") {
-                points = defaultFrontPlatePoints(sourceImage);
-                plate = "전면 번호판 기본 영역 적용 · 상세보기에서 확인 필요";
+                plate = "번호판 미검출 · 자동 합성 안 함 · 검수 필요";
               }
             } catch {
-              points = defaultFrontPlatePoints(sourceImage);
-              plate = "번호판 기본 영역 적용 · 상세보기에서 확인 필요";
+              plate = "번호판 검출 오류 · 자동 합성 안 함 · 검수 필요";
             }
             const composed = await composeImage(cutoutUrl, source, points, "source");
             const blob = composed.blob;
@@ -1081,13 +954,6 @@ export default function Home() {
     acceptFile(images[0]);
   }
 
-  function defaultFrontPlatePoints(source: HTMLImageElement): PlatePoint[] {
-    const landscape = source.naturalWidth >= source.naturalHeight;
-    return landscape
-      ? [{ x: 0.38, y: 0.66 }, { x: 0.62, y: 0.66 }, { x: 0.62, y: 0.745 }, { x: 0.38, y: 0.745 }]
-      : [{ x: 0.37, y: 0.64 }, { x: 0.63, y: 0.64 }, { x: 0.63, y: 0.73 }, { x: 0.37, y: 0.73 }];
-  }
-
   function downloadBatchItem(index: number) {
     const result = batchResults[index];
     if (!result) return;
@@ -1110,10 +976,9 @@ export default function Home() {
         setPlateCoordinates("source");
         setPlatePoints(detection.points.map((point) => ({ x: point.x / source.naturalWidth, y: point.y / source.naturalHeight })));
       } else if (detection.type !== "rear") {
-        setPlateCoordinates("source");
-        setPlatePoints(defaultFrontPlatePoints(source));
+        setPlatePoints([]);
         setPlateStatus("skipped");
-        setPlateMessage("전면 번호판 기본 영역을 불러왔습니다. 네 모서리를 확인해 주세요.");
+        setPlateMessage("번호판을 확실히 검출하지 못해 자동 합성하지 않았습니다. 직접 지정해 주세요.");
       } else {
         setPlatePoints([]);
         setPlateStatus("skipped");
@@ -1207,7 +1072,7 @@ export default function Home() {
           <p className="eyebrow">AI VEHICLE IMAGING</p>
           <h1>찍은 그대로 올리고,<br /><em>전시장 사진처럼.</em></h1>
         </div>
-        <p className="hero-copy">복잡한 야외 배경을 지우고 차량에 어울리는 빛과 공간을 더합니다. 별도 설치 없이 브라우저에서 바로 완성하세요.</p>
+        <p className="hero-copy">촬영장의 흰색·회색·검은색 벽면만 정돈하고 차량, 바닥과 실제 그림자는 그대로 유지합니다.</p>
       </section>
 
       <section className="workspace" onDragOver={(event: DragEvent) => event.preventDefault()} onDrop={(event: DragEvent) => { event.preventDefault(); acceptFiles(event.dataTransfer.files); }}>
@@ -1247,19 +1112,9 @@ export default function Home() {
             {(Object.keys(ratioValues) as Ratio[]).map((key) => <button key={key} className={ratio === key ? "active" : ""} onClick={() => setRatio(key)}>{key === "original" ? "원본" : key}</button>)}
           </div>
           <label className="label">원본 환경</label>
-          <div className="scene-modes">
-            {(["auto", "studio"] as SceneMode[]).map((mode) => (
-              <button key={mode} className={sceneMode === mode ? "active" : ""} onClick={() => setSceneMode(mode)}>
-                {mode === "auto" ? "자동" : "촬영장"}
-              </button>
-            ))}
-          </div>
+          <div className="scene-fixed"><strong>촬영장 전용</strong><span>흰색·회색·검은색 벽면만 교체하고 바닥과 실제 그림자는 유지합니다.</span></div>
           <p className="scene-note">
-            {sceneMode === "auto"
-              ? detectedScene
-                ? `자동 인식: ${detectedScene === "studio" ? "촬영장 · 바닥 유지" : "야외 · 오토인사이드 촬영장 적용"}`
-                : "AI 변환 시 촬영장과 야외를 자동으로 구분합니다"
-              : "기존 바닥과 실제 그림자를 유지하고 벽만 교체합니다"}
+            {detectedScene ? "촬영장 인식 완료 · 기존 바닥과 실제 그림자 유지" : "촬영장 벽면을 분석합니다"}
           </p>
           <div className="wall-strip-tools">
             <label className="wall-strip-toggle">
