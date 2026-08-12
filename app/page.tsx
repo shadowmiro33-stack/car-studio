@@ -407,11 +407,34 @@ async function refineCutout(blob: Blob): Promise<Blob> {
     const original = new Uint8ClampedArray(pixels);
     const width = canvas.width;
     const height = canvas.height;
+    let minX = width;
+    let maxX = 0;
+    let minY = height;
+    let maxY = 0;
+    for (let y = 0; y < height; y += 3) {
+      for (let x = 0; x < width; x += 3) {
+        if (original[(y * width + x) * 4 + 3] < 210) continue;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      }
+    }
+    const subjectWidth = Math.max(1, maxX - minX);
+    const subjectHeight = Math.max(1, maxY - minY);
+    const cleanupLeft = minX - subjectWidth * 0.12;
+    const cleanupRight = maxX + subjectWidth * 0.12;
+    const cleanupTop = minY - subjectHeight * 0.12;
+    const cleanupBottom = maxY + subjectHeight * 0.12;
 
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const offset = (y * width + x) * 4;
         const alpha = original[offset + 3];
+        if (x < cleanupLeft || x > cleanupRight || y < cleanupTop || y > cleanupBottom) {
+          pixels[offset + 3] = 0;
+          continue;
+        }
         if (alpha <= 20) {
           pixels[offset + 3] = 0;
           continue;
@@ -655,12 +678,14 @@ export default function Home() {
   const [batchProgress, setBatchProgress] = useState(0);
   const [batchStatus, setBatchStatus] = useState<"idle" | "working" | "done" | "error">("idle");
   const [batchResults, setBatchResults] = useState<{ name: string; blob: Blob; plate: string; beforeUrl: string; afterUrl: string }[]>([]);
+  const [detailIndex, setDetailIndex] = useState<number | null>(null);
   const [wallStripEnabled, setWallStripEnabled] = useState(true);
   const [wallStrip, setWallStrip] = useState<WallStripPlacement>({ x: 0.5, y: 0.14, scale: 1.04 });
   const [draggingWallStrip, setDraggingWallStrip] = useState(false);
   const [stageAspect, setStageAspect] = useState(16 / 9);
   const inputRef = useRef<HTMLInputElement>(null);
   const objectUrlsRef = useRef<Set<string>>(new Set());
+  const composeSequenceRef = useRef(0);
 
   function createTrackedUrl(blob: Blob) {
     const url = URL.createObjectURL(blob);
@@ -683,7 +708,9 @@ export default function Home() {
 
   useEffect(() => {
     if (!foregroundUrl) return;
-    void composeResult(foregroundUrl);
+    const sequence = ++composeSequenceRef.current;
+    const timer = window.setTimeout(() => { void composeResult(foregroundUrl, sequence); }, 140);
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, sceneMode, wallStripEnabled, wallStrip]);
 
@@ -841,14 +868,16 @@ export default function Home() {
     };
   }
 
-  async function composeResult(foreground: string) {
+  async function composeResult(foreground: string, sequence = ++composeSequenceRef.current) {
     const composed = await composeImage(foreground, sourceUrl);
+    if (sequence !== composeSequenceRef.current) return;
     if (plateCoordinates === "source" && composed.renderedPlatePoints.length === 4) {
       setPlateCoordinates("canvas");
       setPlatePoints(composed.renderedPlatePoints);
     }
     const nextUrl = createTrackedUrl(composed.blob);
     setResultUrl((old) => {
+      if (sequence !== composeSequenceRef.current) return old;
       releaseTrackedUrl(old);
       return nextUrl;
     });
@@ -909,13 +938,17 @@ export default function Home() {
       try {
         const sourceImage = await loadImage(sourceUrl);
         const detection = await detectFrontPlate(sourceImage);
-        setPlateStatus(detection.points.length === 4 ? "done" : "skipped");
+        setPlateStatus(detection.points.length === 4 && detection.type !== "rear" ? "done" : "skipped");
         setPlateMessage(detection.message);
         setPlateCoordinates("source");
-        setPlatePoints(detection.points.length === 4
+        setPlatePoints(detection.points.length === 4 && detection.type !== "rear"
           ? detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }))
           : []);
-        if (detection.points.length !== 4) {
+        if (detection.type === "rear") {
+          setPlatePoints([]);
+          setPlateStatus("skipped");
+          setPlateMessage("후면 번호판은 원본을 유지합니다.");
+        } else if (detection.points.length !== 4) {
           const width = sourceImage.naturalWidth;
           const height = sourceImage.naturalHeight;
           setPlateCoordinates("source");
@@ -988,11 +1021,15 @@ export default function Home() {
             try {
               const detection = await detectFrontPlate(sourceImage);
               plate = detection.message;
-              if (detection.points.length === 4) {
+              if (detection.points.length === 4 && detection.type !== "rear") {
                 points = detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }));
+              } else if (detection.type !== "rear") {
+                points = defaultFrontPlatePoints(sourceImage);
+                plate = "전면 번호판 기본 영역 적용 · 상세보기에서 확인 필요";
               }
             } catch {
-              plate = "번호판 AI를 불러오지 못해 배경만 변환";
+              points = defaultFrontPlatePoints(sourceImage);
+              plate = "번호판 기본 영역 적용 · 상세보기에서 확인 필요";
             }
             const composed = await composeImage(cutoutUrl, source, points, "source");
             const blob = composed.blob;
@@ -1040,7 +1077,24 @@ export default function Home() {
     setBatchResults([]);
     setBatchStatus("idle");
     setBatchProgress(0);
+    setDetailIndex(null);
     acceptFile(images[0]);
+  }
+
+  function defaultFrontPlatePoints(source: HTMLImageElement): PlatePoint[] {
+    const landscape = source.naturalWidth >= source.naturalHeight;
+    return landscape
+      ? [{ x: 0.38, y: 0.66 }, { x: 0.62, y: 0.66 }, { x: 0.62, y: 0.745 }, { x: 0.38, y: 0.745 }]
+      : [{ x: 0.37, y: 0.64 }, { x: 0.63, y: 0.64 }, { x: 0.63, y: 0.73 }, { x: 0.37, y: 0.73 }];
+  }
+
+  function downloadBatchItem(index: number) {
+    const result = batchResults[index];
+    if (!result) return;
+    const link = document.createElement("a");
+    link.href = result.afterUrl;
+    link.download = result.name;
+    link.click();
   }
 
   async function runPlateAi() {
@@ -1050,13 +1104,20 @@ export default function Home() {
     try {
       const source = await loadImage(sourceUrl);
       const detection: PlateDetection = await detectFrontPlate(source);
-      setPlateStatus(detection.points.length === 4 ? "done" : "skipped");
+      setPlateStatus(detection.points.length === 4 && detection.type !== "rear" ? "done" : "skipped");
       setPlateMessage(detection.message);
-      if (detection.points.length === 4) {
+      if (detection.points.length === 4 && detection.type !== "rear") {
         setPlateCoordinates("source");
         setPlatePoints(detection.points.map((point) => ({ x: point.x / source.naturalWidth, y: point.y / source.naturalHeight })));
+      } else if (detection.type !== "rear") {
+        setPlateCoordinates("source");
+        setPlatePoints(defaultFrontPlatePoints(source));
+        setPlateStatus("skipped");
+        setPlateMessage("전면 번호판 기본 영역을 불러왔습니다. 네 모서리를 확인해 주세요.");
       } else {
         setPlatePoints([]);
+        setPlateStatus("skipped");
+        setPlateMessage("후면 번호판은 원본을 유지합니다.");
       }
     } catch (cause) {
       console.error(cause);
@@ -1309,17 +1370,34 @@ export default function Home() {
                 <article className="batch-card" key={`${file.name}-${index}`}>
                   <div className="batch-card-images">
                     <figure><span>BEFORE</span><img src={batchPreviews[index]} alt={`${file.name} 원본`} /></figure>
-                    <figure className={!result ? "pending" : ""}>
+                    <figure className={!result ? "pending" : ""} onClick={() => result && setDetailIndex(index)}>
                       <span>AFTER</span>
                       {result ? <img src={result.afterUrl} alt={`${file.name} 변환 결과`} /> : <div className="batch-placeholder">{batchStatus === "working" ? "변환 대기 중" : "전체 사진 원클릭 변환을 눌러주세요"}</div>}
                     </figure>
                   </div>
-                  <div className="batch-card-meta"><strong>{file.name}</strong><small>{result?.plate ?? "원본 준비됨"}</small></div>
+                  <div className="batch-card-meta"><strong>{file.name}</strong><small>{result?.plate ?? "원본 준비됨"}</small>{result && <button onClick={() => setDetailIndex(index)}>상세보기</button>}</div>
                 </article>
               );
             })}
           </div>
         </section>
+      )}
+
+      {detailIndex !== null && batchResults[detailIndex] && (
+        <div className="detail-viewer" role="dialog" aria-modal="true" aria-label="변환 결과 상세보기" onClick={() => setDetailIndex(null)}>
+          <div className="detail-shell" onClick={(event) => event.stopPropagation()}>
+            <div className="detail-toolbar">
+              <div><strong>{batchResults[detailIndex].name}</strong><small>{detailIndex + 1} / {batchResults.length} · {batchResults[detailIndex].plate}</small></div>
+              <div><button onClick={() => downloadBatchItem(detailIndex)}>↓ 다운로드</button><button aria-label="상세보기 닫기" onClick={() => setDetailIndex(null)}>×</button></div>
+            </div>
+            <div className="detail-images">
+              <figure><span>BEFORE</span><img src={batchResults[detailIndex].beforeUrl} alt="변환 전 상세 이미지" /></figure>
+              <figure><span>AFTER</span><img src={batchResults[detailIndex].afterUrl} alt="변환 결과 상세 이미지" /></figure>
+            </div>
+            <button className="detail-prev" aria-label="이전 결과" disabled={detailIndex === 0} onClick={() => setDetailIndex((current) => Math.max(0, (current ?? 0) - 1))}>‹</button>
+            <button className="detail-next" aria-label="다음 결과" disabled={detailIndex >= batchResults.length - 1} onClick={() => setDetailIndex((current) => Math.min(batchResults.length - 1, (current ?? 0) + 1))}>›</button>
+          </div>
+        </div>
       )}
 
       <section className="how-it-works">
