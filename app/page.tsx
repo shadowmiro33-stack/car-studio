@@ -1166,7 +1166,6 @@ export default function Home() {
               <p>배경 제거부터 촬영장 합성, 전면 번호판 판정까지 순서대로 처리합니다.</p>
               <button disabled={batchStatus === "working"} onClick={runBatch}>{batchStatus === "working" ? `처리 중 ${batchProgress}%` : "전체 사진 원클릭 변환"}</button>
               {batchStatus === "working" && <div className="batch-meter"><i style={{ width: `${batchProgress}%` }} /></div>}
-              {batchResults.length > 0 && <button className="batch-download" onClick={downloadBatch}>완료 결과 ZIP 다운로드 · {batchResults.length}장</button>}
               {batchStatus === "error" && <small>일부 사진 처리 중 오류가 발생했습니다. 완료된 결과는 내려받을 수 있습니다.</small>}
             </div>
           )}
@@ -1245,8 +1244,11 @@ export default function Home() {
 
         <div className="stage-panel">
           <div className="stage-top">
-            <div><span className="status-dot" />{resultUrl ? "변환 완료" : "원본 준비됨"}</div>
-            {resultUrl && <button className="download" onClick={downloadResult}>↓ 결과 저장</button>}
+            <div className="preview-heading">
+              <span className="preview-step">03</span>
+              <span><strong>미리보기</strong><small><i className="status-dot" />{resultUrl ? "변환 완료 · 슬라이더로 원본 비교" : "원본 준비됨 · 왼쪽에서 변환을 시작하세요"}</small></span>
+            </div>
+            <button className="download" disabled={!resultUrl} onClick={downloadResult}>↓ JPG 다운로드</button>
           </div>
           <div
             className={`image-stage ${plateMode ? "targeting" : ""} ${resultUrl ? "comparing" : ""} ${draggingCompare ? "dragging" : ""}`}
@@ -1295,7 +1297,10 @@ export default function Home() {
         <section className="batch-review" aria-label="여러 사진 변환 비교">
           <div className="batch-review-head">
             <div><p className="eyebrow">BATCH BEFORE &amp; AFTER</p><h2>사진별 비포·애프터</h2></div>
-            <div className="batch-summary"><strong>{batchResults.length}</strong><span>/ {batchFiles.length}장 완료</span></div>
+            <div className="batch-head-actions">
+              <div className="batch-summary"><strong>{batchResults.length}</strong><span>/ {batchFiles.length}장 완료</span></div>
+              <button className="batch-review-download" disabled={!batchResults.length} onClick={downloadBatch}>↓ 결과 ZIP 다운로드</button>
+            </div>
           </div>
           <div className="batch-review-grid">
             {batchFiles.map((file, index) => {
@@ -1314,7 +1319,6 @@ export default function Home() {
               );
             })}
           </div>
-          {batchResults.length > 0 && <button className="batch-review-download" onClick={downloadBatch}>완료 결과 ZIP 다운로드 · {batchResults.length}장</button>}
         </section>
       )}
 
