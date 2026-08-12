@@ -1,11 +1,14 @@
 "use client";
 
 import { ChangeEvent, DragEvent, MouseEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { detectFrontPlate, drawPerspectivePlate, type PlateDetection, type PlatePoint } from "./plate-ai";
+import JSZip from "jszip";
 
 type Backdrop = "blue" | "studio" | "warm" | "graphite";
 type Ratio = "original" | "16:9" | "4:3" | "1:1";
 type SceneMode = "auto" | "studio" | "outdoor";
 type SceneKind = Exclude<SceneMode, "auto">;
+type PlateCoordinates = "source" | "canvas";
 
 const backdropNames: Record<Backdrop, string> = {
   blue: "블루 커브 스튜디오",
@@ -588,8 +591,12 @@ export default function Home() {
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [backdrop, setBackdrop] = useState<Backdrop>("blue");
   const [ratio, setRatio] = useState<Ratio>("16:9");
-  const [platePoint, setPlatePoint] = useState<{ x: number; y: number } | null>(null);
+  const [platePoints, setPlatePoints] = useState<PlatePoint[]>([]);
+  const [plateCoordinates, setPlateCoordinates] = useState<PlateCoordinates>("canvas");
   const [plateMode, setPlateMode] = useState(false);
+  const [plateStatus, setPlateStatus] = useState<"idle" | "working" | "done" | "skipped" | "error">("idle");
+  const [plateMessage, setPlateMessage] = useState("전면 번호판을 자동으로 찾거나 네 모서리를 직접 지정하세요.");
+  const [draggingPlateHandle, setDraggingPlateHandle] = useState<number | null>(null);
   const [compare, setCompare] = useState(50);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<"idle" | "working" | "done" | "error">("idle");
@@ -597,6 +604,10 @@ export default function Home() {
   const [sceneMode, setSceneMode] = useState<SceneMode>("auto");
   const [detectedScene, setDetectedScene] = useState<SceneKind | null>(null);
   const [draggingCompare, setDraggingCompare] = useState(false);
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [batchProgress, setBatchProgress] = useState(0);
+  const [batchStatus, setBatchStatus] = useState<"idle" | "working" | "done" | "error">("idle");
+  const [batchResults, setBatchResults] = useState<{ name: string; blob: Blob; plate: string }[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const objectUrlsRef = useRef<Set<string>>(new Set());
 
@@ -623,10 +634,15 @@ export default function Home() {
     if (!foregroundUrl) return;
     void composeResult(foregroundUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [foregroundUrl, backdrop, ratio, platePoint, sceneMode]);
+  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, sceneMode]);
 
-  async function composeResult(foreground: string) {
-    const [image, sourceImage] = await Promise.all([loadImage(foreground), loadImage(sourceUrl)]);
+  async function composeImage(
+    foreground: string,
+    source: string,
+    overlayPoints: PlatePoint[] = platePoints,
+    overlayCoordinates: PlateCoordinates = plateCoordinates,
+  ) {
+    const [image, sourceImage] = await Promise.all([loadImage(foreground), loadImage(source)]);
     const targetRatio = ratioValues[ratio] ?? image.width / image.height;
     const maxSide = 1800;
     let width = image.width;
@@ -750,32 +766,47 @@ export default function Home() {
     }
     context.restore();
 
-    if (platePoint) {
-      const px = platePoint.x * width;
-      const py = platePoint.y * height;
-      const plateWidth = width * 0.15;
-      const plateHeight = Math.max(28, height * 0.055);
-      const gradient = context.createLinearGradient(px - plateWidth / 2, 0, px + plateWidth / 2, 0);
-      gradient.addColorStop(0, "#17191b");
-      gradient.addColorStop(0.5, "#2e3135");
-      gradient.addColorStop(1, "#17191b");
-      context.fillStyle = gradient;
-      roundedRect(context, px - plateWidth / 2, py - plateHeight / 2, plateWidth, plateHeight, plateHeight * 0.16);
-      context.fill();
-      context.fillStyle = "rgba(255,255,255,.78)";
-      context.font = `600 ${Math.max(12, plateHeight * 0.28)}px Arial`;
-      context.textAlign = "center";
-      context.textBaseline = "middle";
-      context.fillText("CAR STUDIO", px, py);
+    if (overlayPoints.length === 4) {
+      const logo = await loadImage("/autoinside-plate-logo.png");
+      drawPerspectivePlate(context, logo, overlayPoints.map((point) => overlayCoordinates === "canvas" ? {
+        x: point.x * width,
+        y: point.y * height,
+      } : {
+        x: drawX + ((point.x * image.width - bounds.x) / bounds.width) * drawWidth,
+        y: drawY + ((point.y * image.height - bounds.y) / bounds.height) * drawHeight,
+      }));
     }
 
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.94));
-    if (!blob) return;
+    if (!blob) throw new Error("결과 이미지를 만들지 못했습니다.");
+    return blob;
+  }
+
+  async function composeResult(foreground: string) {
+    const blob = await composeImage(foreground, sourceUrl);
     const nextUrl = createTrackedUrl(blob);
     setResultUrl((old) => {
       releaseTrackedUrl(old);
       return nextUrl;
     });
+  }
+
+  async function removeVehicleBackground(source: string, onProgress?: (value: number) => void) {
+    const response = await fetch(source);
+    const sourceBlob = await response.blob();
+    const { removeBackground } = await import("@imgly/background-removal");
+    const cutout = await removeBackground(sourceBlob, {
+      publicPath: `${window.location.origin}/api/ai-assets/`,
+      model: "isnet_fp16",
+      device: "gpu",
+      proxyToWorker: false,
+      fetchArgs: { cache: "force-cache" },
+      output: { format: "image/png", quality: 1, type: "foreground" },
+      progress: (_key: string, current: number, total: number) => {
+        if (total > 0) onProgress?.(Math.round((current / total) * 100));
+      },
+    });
+    return refineCutout(cutout);
   }
 
   function acceptFile(file?: File) {
@@ -794,7 +825,11 @@ export default function Home() {
       releaseTrackedUrl(old);
       return null;
     });
-    setPlatePoint(null);
+    setPlatePoints([]);
+    setPlateCoordinates("canvas");
+    setPlateMode(false);
+    setPlateStatus("idle");
+    setPlateMessage("전면 번호판을 자동으로 찾거나 네 모서리를 직접 지정하세요.");
     setStatus("idle");
     setDetectedScene(null);
     setProgress(0);
@@ -806,23 +841,23 @@ export default function Home() {
     setError("");
     setProgress(4);
     try {
-      const response = await fetch(sourceUrl);
-      const sourceBlob = await response.blob();
-      const { removeBackground } = await import("@imgly/background-removal");
-      const cutout = await removeBackground(sourceBlob, {
-        publicPath: `${window.location.origin}/api/ai-assets/`,
-        model: "isnet_fp16",
-        device: "gpu",
-        proxyToWorker: false,
-        fetchArgs: { cache: "force-cache" },
-        output: { format: "image/png", quality: 1, type: "foreground" },
-        progress: (_key: string, current: number, total: number) => {
-          if (total > 0) setProgress(Math.max(6, Math.min(90, Math.round((current / total) * 90))));
-        },
-      });
+      const cutout = await removeVehicleBackground(sourceUrl, (value) => setProgress(Math.max(6, Math.min(90, Math.round(value * 0.9)))));
       setProgress(94);
-      const refinedCutout = await refineCutout(cutout);
-      const nextUrl = createTrackedUrl(refinedCutout);
+      try {
+        const sourceImage = await loadImage(sourceUrl);
+        const detection = await detectFrontPlate(sourceImage);
+        setPlateStatus(detection.type === "front" ? "done" : "skipped");
+        setPlateMessage(detection.message);
+        setPlateCoordinates("source");
+        setPlatePoints(detection.type === "front"
+          ? detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }))
+          : []);
+      } catch {
+        setPlateStatus("error");
+        setPlateMessage("번호판 AI를 불러오지 못해 배경만 변환했습니다.");
+        setPlatePoints([]);
+      }
+      const nextUrl = createTrackedUrl(cutout);
       setForegroundUrl((old) => {
         releaseTrackedUrl(old);
         return nextUrl;
@@ -840,11 +875,125 @@ export default function Home() {
   function placePlate(event: MouseEvent<HTMLDivElement>) {
     if (!plateMode || !resultUrl) return;
     const bounds = event.currentTarget.getBoundingClientRect();
-    setPlatePoint({
+    const point = {
       x: (event.clientX - bounds.left) / bounds.width,
       y: (event.clientY - bounds.top) / bounds.height,
-    });
+    };
+    setPlatePoints((current) => current.length >= 4 ? [point] : [...current, point]);
+    setPlateMessage(platePoints.length >= 3 ? "번호판 영역을 적용했습니다. 모서리를 드래그해 조정할 수 있습니다." : `${platePoints.length + 1}/4 지점 지정됨`);
+    if (platePoints.length >= 3) setPlateMode(false);
+  }
+
+  async function runBatch() {
+    if (!batchFiles.length) return;
+    setBatchStatus("working");
+    setBatchResults([]);
+    setBatchProgress(0);
+    const completed: { name: string; blob: Blob; plate: string }[] = [];
+    try {
+      for (let index = 0; index < batchFiles.length; index += 1) {
+        const file = batchFiles[index];
+        const source = URL.createObjectURL(file);
+        try {
+          const cutoutBlob = await removeVehicleBackground(source, (value) => {
+            setBatchProgress(Math.round(((index + value / 100) / batchFiles.length) * 100));
+          });
+          const cutoutUrl = URL.createObjectURL(cutoutBlob);
+          try {
+            const sourceImage = await loadImage(source);
+            let points: PlatePoint[] = [];
+            let plate = "번호판 미적용";
+            try {
+              const detection = await detectFrontPlate(sourceImage);
+              plate = detection.message;
+              if (detection.type === "front") {
+                points = detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }));
+              }
+            } catch {
+              plate = "번호판 AI를 불러오지 못해 배경만 변환";
+            }
+            const blob = await composeImage(cutoutUrl, source, points, "source");
+            completed.push({ name: `${file.name.replace(/\.[^.]+$/, "")}-studio.jpg`, blob, plate });
+            setBatchResults([...completed]);
+          } finally {
+            URL.revokeObjectURL(cutoutUrl);
+          }
+        } finally {
+          URL.revokeObjectURL(source);
+        }
+      }
+      setBatchProgress(100);
+      setBatchStatus("done");
+    } catch (cause) {
+      console.error(cause);
+      setBatchStatus("error");
+    }
+  }
+
+  async function downloadBatch() {
+    if (!batchResults.length) return;
+    const archive = new JSZip();
+    batchResults.forEach((result) => archive.file(result.name, result.blob));
+    archive.file("처리결과.txt", batchResults.map((result) => `${result.name}\t${result.plate}`).join("\n"));
+    const blob = await archive.generateAsync({ type: "blob" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `car-studio-results-${Date.now()}.zip`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }
+
+  function acceptFiles(files?: FileList | File[]) {
+    const images = Array.from(files ?? []).filter((file) => file.type.startsWith("image/"));
+    if (!images.length) return;
+    setBatchFiles(images);
+    setBatchResults([]);
+    setBatchStatus("idle");
+    setBatchProgress(0);
+    acceptFile(images[0]);
+  }
+
+  async function runPlateAi() {
+    setPlateStatus("working");
     setPlateMode(false);
+    setPlateMessage("번호판 AI 모델을 준비하고 있습니다. 첫 실행은 조금 걸릴 수 있습니다.");
+    try {
+      const source = await loadImage(sourceUrl);
+      const detection: PlateDetection = await detectFrontPlate(source);
+      setPlateStatus(detection.type === "front" ? "done" : "skipped");
+      setPlateMessage(detection.message);
+      if (detection.type === "front") {
+        setPlateCoordinates("source");
+        setPlatePoints(detection.points.map((point) => ({ x: point.x / source.naturalWidth, y: point.y / source.naturalHeight })));
+      } else {
+        setPlatePoints([]);
+      }
+    } catch (cause) {
+      console.error(cause);
+      setPlateStatus("error");
+      setPlateMessage("번호판 AI를 불러오지 못했습니다. 직접 지정 기능은 계속 사용할 수 있습니다.");
+    }
+  }
+
+  function startManualPlate() {
+    setPlatePoints([]);
+    setPlateCoordinates("canvas");
+    setPlateMode(true);
+    setPlateStatus("idle");
+    setPlateMessage("번호판의 좌상단 → 우상단 → 우하단 → 좌하단 순서로 선택하세요.");
+  }
+
+  function updatePlateHandle(event: ReactPointerEvent<HTMLButtonElement>, index: number) {
+    event.preventDefault();
+    event.stopPropagation();
+    const stage = event.currentTarget.closest(".image-stage") as HTMLDivElement | null;
+    if (!stage) return;
+    const bounds = stage.getBoundingClientRect();
+    const next = {
+      x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height)),
+    };
+    setPlatePoints((current) => current.map((point, pointIndex) => pointIndex === index ? next : point));
   }
 
   function downloadResult() {
@@ -861,7 +1010,7 @@ export default function Home() {
   }
 
   function startCompareDrag(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!resultUrl || plateMode) return;
+    if (!resultUrl || plateMode || draggingPlateHandle !== null) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     setDraggingCompare(true);
     updateCompareFromPointer(event);
@@ -900,7 +1049,7 @@ export default function Home() {
         <p className="hero-copy">복잡한 야외 배경을 지우고 차량에 어울리는 빛과 공간을 더합니다. 별도 설치 없이 브라우저에서 바로 완성하세요.</p>
       </section>
 
-      <section className="workspace" onDragOver={(event: DragEvent) => event.preventDefault()} onDrop={(event: DragEvent) => { event.preventDefault(); acceptFile(event.dataTransfer.files[0]); }}>
+      <section className="workspace" onDragOver={(event: DragEvent) => event.preventDefault()} onDrop={(event: DragEvent) => { event.preventDefault(); acceptFiles(event.dataTransfer.files); }}>
         <aside className="controls">
           <div className="step-heading"><span>01</span><div><h2>차량 사진</h2><p>JPG, PNG · 최대 20MB 권장</p></div></div>
           <button className="upload-card" onClick={() => inputRef.current?.click()}>
@@ -908,8 +1057,19 @@ export default function Home() {
             <strong>사진 바꾸기</strong>
             <span>클릭하거나 파일을 끌어오세요</span>
           </button>
-          <input ref={inputRef} hidden type="file" accept="image/jpeg,image/png,image/webp" onChange={(event: ChangeEvent<HTMLInputElement>) => acceptFile(event.target.files?.[0])} />
+          <input ref={inputRef} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={(event: ChangeEvent<HTMLInputElement>) => acceptFiles(event.target.files ?? undefined)} />
           <div className="file-row"><span className="file-thumb"><img src={sourceUrl} alt="선택한 차량" /></span><span><strong>{sourceName}</strong><small>원본 이미지 준비됨</small></span><b>✓</b></div>
+
+          {batchFiles.length > 1 && (
+            <div className="batch-panel">
+              <strong>{batchFiles.length}장 일괄 변환</strong>
+              <p>배경 제거부터 촬영장 합성, 전면 번호판 판정까지 순서대로 처리합니다.</p>
+              <button disabled={batchStatus === "working"} onClick={runBatch}>{batchStatus === "working" ? `처리 중 ${batchProgress}%` : "전체 사진 원클릭 변환"}</button>
+              {batchStatus === "working" && <div className="batch-meter"><i style={{ width: `${batchProgress}%` }} /></div>}
+              {batchResults.length > 0 && <button className="batch-download" onClick={downloadBatch}>완료 결과 ZIP 다운로드 · {batchResults.length}장</button>}
+              {batchStatus === "error" && <small>일부 사진 처리 중 오류가 발생했습니다. 완료된 결과는 내려받을 수 있습니다.</small>}
+            </div>
+          )}
 
           <div className="divider" />
           <div className="step-heading"><span>02</span><div><h2>스튜디오 설정</h2><p>배경과 결과 비율을 선택하세요</p></div></div>
@@ -943,13 +1103,20 @@ export default function Home() {
                 ? "기존 바닥과 실제 그림자를 유지하고 벽만 교체합니다"
                 : "야외 배경과 바닥을 오토인사이드 촬영장으로 변환합니다"}
           </p>
-          <button className={`plate-button ${plateMode ? "active" : ""}`} disabled={!resultUrl} onClick={() => setPlateMode((value) => !value)}>
-            <span>▰</span><span><strong>번호판 보호</strong><small>{platePoint ? "위치 지정됨 · 다시 누르면 재설정" : "누른 뒤 이미지의 번호판을 선택"}</small></span>
+          <div className="plate-tools">
+          <button className="plate-button" disabled={!resultUrl || plateStatus === "working"} onClick={runPlateAi}>
+            <span>AI</span><span><strong>전면 번호판 자동 교체</strong><small>전면으로 확실할 때만 Autoinside 번호판 적용</small></span>
           </button>
-          {platePoint && <button className="text-button" onClick={() => setPlatePoint(null)}>번호판 가림 해제</button>}
+          <button className={`plate-button ${plateMode ? "active" : ""}`} disabled={!resultUrl} onClick={startManualPlate}>
+            <span>4P</span><span><strong>번호판 직접 지정</strong><small>{platePoints.length ? `${platePoints.length}/4 지점 지정됨` : "네 모서리를 순서대로 선택"}</small></span>
+          </button>
+
+          <p className={`plate-status ${plateStatus}`}>{plateMessage}</p>
+          {platePoints.length === 4 && <button className="text-button" onClick={() => { setPlatePoints([]); setPlateStatus("idle"); setPlateMessage("번호판 교체를 해제했습니다."); }}>번호판 교체 해제</button>}
+          </div>
 
           <button className="primary" disabled={status === "working"} onClick={runAi}>
-            {status === "working" ? "AI가 차량을 분리하는 중…" : resultUrl ? "AI 다시 변환하기" : "AI 스튜디오 변환"}
+            {status === "working" ? "배경 제거·촬영장 합성·번호판 판정 중…" : resultUrl ? "한 번에 다시 변환하기" : "한 번에 배경 날리고 변환"}
             <span>→</span>
           </button>
           {status === "working" && <div className="progress"><i style={{ width: `${progress}%` }} /><span>첫 실행은 AI 모델 준비로 조금 더 걸릴 수 있어요 · {progress}%</span></div>}
@@ -982,7 +1149,19 @@ export default function Home() {
             {resultUrl && <div className="compare-line" style={{ left: `${compare}%` }}><i>↔</i></div>}
             {!resultUrl && status !== "working" && <div className="ready-badge"><b>READY</b><span>왼쪽 설정을 확인하고<br />AI 변환을 시작하세요</span></div>}
             {status === "working" && <div className="processing-overlay"><div className="scanner" /><strong>차량 윤곽을 찾고 있습니다</strong><span>창문, 휠, 그림자를 섬세하게 분리하는 중</span></div>}
-            {plateMode && <div className="plate-hint">번호판 중앙을 클릭하세요</div>}
+            {resultUrl && platePoints.length === 4 && platePoints.map((point, index) => (
+              <button
+                key={index}
+                className="plate-handle"
+                aria-label={`번호판 모서리 ${index + 1}`}
+                style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }}
+                onPointerDown={(event) => { event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); setDraggingPlateHandle(index); }}
+                onPointerMove={(event) => { if (draggingPlateHandle === index) updatePlateHandle(event, index); }}
+                onPointerUp={(event) => { updatePlateHandle(event, index); setDraggingPlateHandle(null); }}
+                onPointerCancel={() => setDraggingPlateHandle(null)}
+              />
+            ))}
+            {plateMode && <div className="plate-hint">번호판 네 모서리를 좌상단부터 시계 방향으로 선택하세요 · {platePoints.length}/4</div>}
           </div>
           {resultUrl && <div className="compare-control"><span>원본</span><input aria-label="원본과 결과 비교" type="range" min="0" max="100" value={compare} onChange={(event) => setCompare(Number(event.target.value))} /><span>AI 결과</span></div>}
           <div className="stage-footer"><span>원본 차량의 형태와 색상은 유지됩니다</span><span>{ratio === "original" ? "원본 비율" : ratio} · 고화질 JPG</span></div>

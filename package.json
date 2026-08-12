@@ -16,6 +16,7 @@
   "dependencies": {
     "@imgly/background-removal": "^1.7.0",
     "drizzle-orm": "0.45.2",
+    "jszip": "^3.10.1",
     "onnxruntime-web": "^1.21.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"
