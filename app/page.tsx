@@ -207,10 +207,10 @@ function estimateFloorHorizon(source: HTMLImageElement, foreground: HTMLImageEle
 
 function drawProjectedShadow(
   context: CanvasRenderingContext2D,
-  _image: HTMLImageElement,
-  _bounds: SubjectBounds,
+  image: HTMLImageElement,
+  bounds: SubjectBounds,
   drawX: number,
-  _drawY: number,
+  drawY: number,
   drawWidth: number,
   drawHeight: number,
   floorY: number,
@@ -218,27 +218,41 @@ function drawProjectedShadow(
   canvasHeight: number,
   backdrop: Backdrop,
 ) {
-  const layers = [
-    { radiusX: 0.36, radiusY: 0.018, offsetY: -0.004, blur: 0.009, alpha: backdrop === "graphite" ? 0.34 : 0.2 },
-    { radiusX: 0.29, radiusY: 0.008, offsetY: -0.008, blur: 0.003, alpha: backdrop === "graphite" ? 0.5 : 0.34 },
-  ];
-  for (const layer of layers) {
-    context.save();
-    context.filter = `blur(${Math.max(2, canvasWidth * layer.blur)}px)`;
-    context.fillStyle = `rgba(5,7,8,${layer.alpha})`;
-    context.beginPath();
-    context.ellipse(
-      drawX + drawWidth * 0.5,
-      floorY + drawHeight * layer.offsetY,
-      drawWidth * layer.radiusX,
-      Math.max(3, canvasHeight * layer.radiusY),
-      0,
-      0,
-      Math.PI * 2,
-    );
-    context.fill();
-    context.restore();
-  }
+  const light = estimateLight(image, bounds);
+  const slope = light.castDirection * 0.22;
+  const shadowOpacity = backdrop === "graphite" ? light.opacity * 1.45 : light.opacity;
+
+  context.save();
+  context.beginPath();
+  context.rect(0, floorY - Math.max(2, canvasHeight * 0.003), canvasWidth, canvasHeight - floorY + 8);
+  context.clip();
+  context.filter = `brightness(0) saturate(0) blur(${Math.max(6, canvasWidth * 0.0045)}px) opacity(${shadowOpacity})`;
+  context.transform(
+    1,
+    0,
+    -slope,
+    -light.projectionScale,
+    slope * floorY,
+    floorY * (1 + light.projectionScale),
+  );
+  context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
+  context.restore();
+
+  context.save();
+  context.filter = `blur(${Math.max(3, canvasWidth * 0.0022)}px)`;
+  context.fillStyle = backdrop === "graphite" ? "rgba(0,0,0,.5)" : "rgba(10,13,15,.32)";
+  context.beginPath();
+  context.ellipse(
+    drawX + drawWidth * (0.5 + light.castDirection * 0.018),
+    floorY,
+    drawWidth * 0.29,
+    Math.max(4, canvasHeight * 0.007),
+    0,
+    0,
+    Math.PI * 2,
+  );
+  context.fill();
+  context.restore();
 }
 
 function largestAlphaComponent(pixels: Uint8ClampedArray, width: number, height: number) {
@@ -302,18 +316,6 @@ async function refineCutout(blob: Blob): Promise<Blob> {
     const width = canvas.width;
     const height = canvas.height;
     const component = largestAlphaComponent(original, width, height);
-    let vehicleLeft = width;
-    let vehicleRight = 0;
-    for (let y = Math.floor(height * 0.12); y < Math.floor(height * 0.76); y += 2) {
-      for (let x = 0; x < width; x += 2) {
-        if (original[(y * width + x) * 4 + 3] < 210) continue;
-        vehicleLeft = Math.min(vehicleLeft, x);
-        vehicleRight = Math.max(vehicleRight, x);
-      }
-    }
-    const vehicleSpan = Math.max(1, vehicleRight - vehicleLeft);
-    const floorPruneLeft = vehicleLeft - vehicleSpan * 0.1;
-    const floorPruneRight = vehicleRight + vehicleSpan * 0.1;
     let minX = width;
     let maxX = 0;
     let minY = height;
@@ -340,10 +342,6 @@ async function refineCutout(blob: Blob): Promise<Blob> {
         const alpha = original[offset + 3];
         const componentIndex = Math.floor(y / component.step) * component.gridWidth + Math.floor(x / component.step);
         if (!component.keep[componentIndex]) {
-          pixels[offset + 3] = 0;
-          continue;
-        }
-        if (y > height * 0.58 && (x < floorPruneLeft || x > floorPruneRight)) {
           pixels[offset + 3] = 0;
           continue;
         }
@@ -421,13 +419,33 @@ function drawStudioBackdrop(
   glow.addColorStop(1, "rgba(255,255,255,0)");
   context.fillStyle = glow;
   context.fillRect(0, 0, width, height);
+}
 
-  const floor = context.createLinearGradient(0, height * 0.64, 0, height);
-  floor.addColorStop(0, "rgba(255,255,255,0)");
-  floor.addColorStop(0.18, backdrop === "graphite" ? "rgba(7,8,9,.18)" : "rgba(255,255,255,.12)");
-  floor.addColorStop(1, backdrop === "graphite" ? "rgba(0,0,0,.42)" : "rgba(70,74,76,.16)");
-  context.fillStyle = floor;
-  context.fillRect(0, height * 0.64, width, height * 0.36);
+function restoreOriginalFloor(
+  context: CanvasRenderingContext2D,
+  source: HTMLImageElement,
+  width: number,
+  height: number,
+  horizonRatio: number,
+) {
+  const floorCanvas = document.createElement("canvas");
+  floorCanvas.width = width;
+  floorCanvas.height = height;
+  const floorContext = floorCanvas.getContext("2d");
+  if (!floorContext) return;
+
+  floorContext.drawImage(source, 0, 0, width, height);
+  const horizon = height * horizonRatio;
+  const feather = height * 0.018;
+  const mask = floorContext.createLinearGradient(0, horizon - feather, 0, horizon + feather);
+  mask.addColorStop(0, "rgba(0,0,0,0)");
+  mask.addColorStop(0.48, "rgba(0,0,0,.08)");
+  mask.addColorStop(1, "rgba(0,0,0,1)");
+  floorContext.globalCompositeOperation = "destination-in";
+  floorContext.fillStyle = mask;
+  floorContext.fillRect(0, horizon - feather, width, height - horizon + feather);
+  floorContext.globalCompositeOperation = "source-over";
+  context.drawImage(floorCanvas, 0, 0);
 }
 
 function drawImageCover(
@@ -553,7 +571,7 @@ export default function Home() {
     overlayPoints: PlatePoint[] = platePoints,
     overlayCoordinates: PlateCoordinates = plateCoordinates,
   ) {
-    const image = await loadImage(foreground);
+    const [image, sourceImage] = await Promise.all([loadImage(foreground), loadImage(source)]);
     const targetRatio = ratioValues[ratio] ?? image.width / image.height;
     const maxSide = 1800;
     let width = image.width;
@@ -581,6 +599,12 @@ export default function Home() {
       const stripSource = await loadImage("/autoinside-wall-strip.png");
       drawWallStrip(context, createTransparentWallStrip(stripSource), width, height, wallStrip);
     }
+    const preserveFloor = ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
+    if (preserveFloor) {
+      const floorHorizon = estimateFloorHorizon(sourceImage, image);
+      restoreOriginalFloor(context, sourceImage, width, height, floorHorizon);
+    }
+
     const bounds = getSubjectBounds(image);
     let drawWidth: number;
     let drawHeight: number;
@@ -605,7 +629,8 @@ export default function Home() {
       drawY = floorY - drawHeight;
     }
     const bottomProfile = getBottomProfile(image, bounds);
-    drawProjectedShadow(
+    if (!preserveFloor) {
+      drawProjectedShadow(
         context,
         image,
         bounds,
@@ -618,8 +643,9 @@ export default function Home() {
         height,
         renderBackdrop,
       );
+    }
 
-    if (bottomProfile.length > 1) {
+    if (!preserveFloor && bottomProfile.length > 1) {
       const first = bottomProfile[0];
       context.save();
       context.filter = `blur(${Math.max(1.5, width * 0.0012)}px)`;
@@ -984,7 +1010,7 @@ export default function Home() {
           <p className="eyebrow">AI VEHICLE IMAGING</p>
           <h1>찍은 그대로 올리고,<br /><em>전시장 사진처럼.</em></h1>
         </div>
-        <p className="hero-copy">촬영장의 벽과 바닥을 깨끗하게 정돈하고 차량 아래 접지 그림자를 자연스럽게 다시 만듭니다.</p>
+        <p className="hero-copy">촬영장의 흰색·회색·검은색 벽면만 정돈하고 차량, 바닥과 실제 그림자는 그대로 유지합니다.</p>
       </section>
 
       <section className="workspace" onDragOver={(event: DragEvent) => event.preventDefault()} onDrop={(event: DragEvent) => { event.preventDefault(); acceptFiles(event.dataTransfer.files); }}>
@@ -1024,9 +1050,9 @@ export default function Home() {
             {(Object.keys(ratioValues) as Ratio[]).map((key) => <button key={key} className={ratio === key ? "active" : ""} onClick={() => setRatio(key)}>{key === "original" ? "원본" : key}</button>)}
           </div>
           <label className="label">원본 환경</label>
-          <div className="scene-fixed"><strong>촬영장 전용</strong><span>흰색·회색·검은색 벽과 바닥을 함께 교체하고 접지 그림자를 재구성합니다.</span></div>
+          <div className="scene-fixed"><strong>촬영장 전용</strong><span>흰색·회색·검은색 벽면만 교체하고 바닥과 실제 그림자는 유지합니다.</span></div>
           <p className="scene-note">
-            {detectedScene ? "촬영장 인식 완료 · 벽·바닥 정리 및 접지 그림자 적용" : "촬영장 벽과 바닥을 분석합니다"}
+            {detectedScene ? "촬영장 인식 완료 · 기존 바닥과 실제 그림자 유지" : "촬영장 벽면을 분석합니다"}
           </p>
           <div className="wall-strip-tools">
             <label className="wall-strip-toggle">
