@@ -271,10 +271,13 @@ function largestAlphaComponent(pixels: Uint8ClampedArray, width: number, height:
       let solid = 0;
       for (let y = gy * step; y < Math.min(height, (gy + 1) * step); y += 1) {
         for (let x = gx * step; x < Math.min(width, (gx + 1) * step); x += 1) {
-          if (pixels[(y * width + x) * 4 + 3] > 160) solid += 1;
+          const idx = (y * width + x) * 4;
+          const alpha = pixels[idx + 3];
+          // 어두운 배경/검은 차체 사진 고려: 알파 120 이상이거나 반투명 영역 포함
+          if (alpha > 120) solid += 1;
         }
       }
-      if (solid >= Math.max(1, step * step * 0.3)) mask[gy * gridWidth + gx] = 1;
+      if (solid >= Math.max(1, step * step * 0.22)) mask[gy * gridWidth + gx] = 1;
     }
   }
   const visited = new Uint8Array(mask.length);
@@ -336,11 +339,9 @@ function removeFloorArtifacts(
   const thicknessThreshold = Math.max(6, subjectHeight * 0.05);
 
   for (let x = 0; x < width; x++) {
-    // 차체 본체 내부이고 타이어 영역이면 보호
     const inBodyRange = x >= bodyLeft && x <= bodyRight;
     const inTireZone = x >= tireLeftZone && x <= tireRightZone;
 
-    // 하단부에서 위로 스캔하며 불투명 픽셀 연속 길이 측정
     let runStart = -1;
     let runLength = 0;
 
@@ -351,16 +352,12 @@ function removeFloorArtifacts(
         runLength++;
       } else {
         if (runLength > 0 && runLength < thicknessThreshold) {
-          // 얇은 구조 발견
-          // 차체 본체 안이면서 타이어 영역이면 보호
           if (inBodyRange && inTireZone && runStart >= tireTopZone) {
             // 타이어 접지부 보호
           } else if (!inBodyRange || runLength < thicknessThreshold * 0.6) {
-            // 차체 밖이거나 매우 얇은 경우 제거
             for (let ry = runStart; ry > runStart - runLength; ry--) {
               if (ry >= 0 && ry < height) {
                 const offset = (ry * width + x) * 4;
-                // 페더링: 경계를 부드럽게
                 const distFromEdge = Math.min(ry - (runStart - runLength), runStart - ry);
                 const fade = Math.min(1, distFromEdge / 2);
                 pixels[offset + 3] = Math.round(pixels[offset + 3] * (1 - fade));
@@ -375,8 +372,6 @@ function removeFloorArtifacts(
   }
 
   // 2단계: 수평 경계선 감지 및 제거
-  // 마스크 하단 영역에서 수평 run-length가 차체 폭의 85% 이상이고
-  // 수직 두께가 얇은(< 10px) 구조 탐지
   for (let y = Math.max(0, Math.floor(scanTop)); y < height; y++) {
     let horizontalRun = 0;
     let runStartX = -1;
@@ -387,14 +382,12 @@ function removeFloorArtifacts(
         horizontalRun++;
       } else {
         if (horizontalRun > subjectWidth * 0.85) {
-          // 긴 수평 선 발견 — 수직 두께 확인
           let verticalThickness = 0;
           for (let vy = Math.max(0, y - 8); vy <= Math.min(height - 1, y + 8); vy++) {
             const midX = Math.floor((runStartX + x) / 2);
             if (pixels[(vy * width + midX) * 4 + 3] > 80) verticalThickness++;
           }
           if (verticalThickness < 10) {
-            // 얇은 수평선 제거 (타이어 보호 영역 제외)
             for (let rx = runStartX; rx < x; rx++) {
               const inTire = rx >= tireLeftZone && rx <= tireRightZone && y >= tireTopZone;
               if (inTire) continue;
@@ -436,7 +429,7 @@ async function refineCutout(blob: Blob): Promise<Blob> {
     let maxY = 0;
     for (let y = 0; y < height; y += 3) {
       for (let x = 0; x < width; x += 3) {
-        if (original[(y * width + x) * 4 + 3] < 210) continue;
+        if (original[(y * width + x) * 4 + 3] < 180) continue;
         minX = Math.min(minX, x);
         maxX = Math.max(maxX, x);
         minY = Math.min(minY, y);
@@ -450,11 +443,22 @@ async function refineCutout(blob: Blob): Promise<Blob> {
     const cleanupTop = minY - subjectHeight * 0.12;
     const cleanupBottom = maxY + subjectHeight * 0.12;
 
+    // 검은색/회색 배경 정밀 후처리
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const offset = (y * width + x) * 4;
         const alpha = original[offset + 3];
         const componentIndex = Math.floor(y / component.step) * component.gridWidth + Math.floor(x / component.step);
+        
+        // 차체 본체 내부(Subject Center) 어두운 영역 보존 (검은색 차체, 휠/타이어)
+        const inCoreVehicleArea = x >= minX + subjectWidth * 0.15 && x <= maxX - subjectWidth * 0.15 &&
+                                  y >= minY + subjectHeight * 0.15 && y <= maxY - subjectHeight * 0.15;
+        if (inCoreVehicleArea && alpha > 35) {
+          // 차체 내부에서 어두운 픽셀 알파 복원
+          pixels[offset + 3] = Math.max(alpha, 240);
+          continue;
+        }
+
         if (!component.keep[componentIndex]) {
           pixels[offset + 3] = 0;
           continue;
@@ -463,7 +467,7 @@ async function refineCutout(blob: Blob): Promise<Blob> {
           pixels[offset + 3] = 0;
           continue;
         }
-        if (alpha <= 20) {
+        if (alpha <= 15) {
           pixels[offset + 3] = 0;
           continue;
         }
@@ -480,19 +484,19 @@ async function refineCutout(blob: Blob): Promise<Blob> {
             if (sampleX < 0 || sampleX >= width) continue;
             const sampleOffset = (sampleY * width + sampleX) * 4;
             const sampleAlpha = original[sampleOffset + 3];
-            if (sampleAlpha > 96) solidNeighbors += 1;
+            if (sampleAlpha > 80) solidNeighbors += 1;
             if (sampleAlpha > bestAlpha) {
               bestAlpha = sampleAlpha;
               bestOffset = sampleOffset;
             }
           }
         }
-        if (solidNeighbors < 5) {
+        if (solidNeighbors < 4) {
           pixels[offset + 3] = 0;
           continue;
         }
 
-        const normalized = Math.max(0, Math.min(1, (alpha - 24) / 216));
+        const normalized = Math.max(0, Math.min(1, (alpha - 15) / 225));
         const smoothAlpha = normalized * normalized * (3 - 2 * normalized);
         pixels[offset + 3] = Math.round(smoothAlpha * 255);
         const decontaminate = (1 - smoothAlpha) * Math.min(1, bestAlpha / 220) * 0.72;

@@ -53,29 +53,34 @@ function topPlateBox(output: Record<string, import("onnxruntime-web").Tensor>, w
   const logits = output.logits?.data as Float32Array | undefined;
   const boxes = output.pred_boxes?.data as Float32Array | undefined;
   if (!logits || !boxes) return null;
-  let bestIndex = -1;
-  let bestScore = 0;
+  
+  const candidates: PlateBox[] = [];
   for (let index = 0; index < Math.min(300, logits.length); index += 1) {
     const score = 1 / (1 + Math.exp(-logits[index]));
-    if (score > bestScore) {
-      bestScore = score;
-      bestIndex = index;
+    if (score >= 0.03) {
+      const offset = index * 4;
+      const cx = boxes[offset];
+      const cy = boxes[offset + 1];
+      const boxWidth = boxes[offset + 2];
+      const boxHeight = boxes[offset + 3];
+      const candidate: PlateBox = {
+        source: "model",
+        left: Math.max(0, (cx - boxWidth / 2) * width),
+        top: Math.max(0, (cy - boxHeight / 2) * height),
+        right: Math.min(width, (cx + boxWidth / 2) * width),
+        bottom: Math.min(height, (cy + boxHeight / 2) * height),
+        score,
+      };
+      if (isPlausiblePlateBox(candidate, width, height)) {
+        candidates.push(candidate);
+      }
     }
   }
-  if (bestIndex < 0 || bestScore < 0.05) return null;
-  const offset = bestIndex * 4;
-  const cx = boxes[offset];
-  const cy = boxes[offset + 1];
-  const boxWidth = boxes[offset + 2];
-  const boxHeight = boxes[offset + 3];
-  return {
-    source: "model",
-    left: Math.max(0, (cx - boxWidth / 2) * width),
-    top: Math.max(0, (cy - boxHeight / 2) * height),
-    right: Math.min(width, (cx + boxWidth / 2) * width),
-    bottom: Math.min(height, (cy + boxHeight / 2) * height),
-    score: bestScore,
-  };
+
+  if (candidates.length === 0) return null;
+  // 높은 점수 + 중앙 또는 하단에 위치한 최적의 번호판 후보 선택
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0];
 }
 
 function isPlausiblePlateBox(plate: PlateBox, width: number, height: number) {
@@ -84,11 +89,11 @@ function isPlausiblePlateBox(plate: PlateBox, width: number, height: number) {
   const aspectRatio = plateWidth / Math.max(1, plateHeight);
   const areaRatio = (plateWidth * plateHeight) / (width * height);
   const redDealer = plate.source === "red-dealer";
-  // 측면 사진에서 번호판이 원근 변환되어 종횡비가 낮아지고 가장자리에 위치할 수 있음
-  return aspectRatio >= (redDealer ? 0.5 : 1.8) && aspectRatio <= 7
-    && areaRatio >= (redDealer ? 0.0008 : 0.0025) && areaRatio <= (redDealer ? 0.08 : 0.03)
-    && plate.left >= width * 0.02 && plate.right <= width * 0.98
-    && plate.top >= height * 0.2 && plate.bottom <= height * (redDealer ? 0.97 : 0.88);
+  // 측면/원근 사진에서 번호판 종횡비가 0.6~7.5까지 크게 왜곡될 수 있음
+  return aspectRatio >= (redDealer ? 0.35 : 0.6) && aspectRatio <= 7.5
+    && areaRatio >= (redDealer ? 0.0005 : 0.0015) && areaRatio <= (redDealer ? 0.08 : 0.04)
+    && plate.left >= width * 0.01 && plate.right <= width * 0.99
+    && plate.top >= height * 0.15 && plate.bottom <= height * (redDealer ? 0.98 : 0.92);
 }
 
 function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
