@@ -499,21 +499,14 @@ async function refineCutout(blob: Blob): Promise<Blob> {
     const cleanupTop = minY - subjectHeight * 0.12;
     const cleanupBottom = maxY + subjectHeight * 0.12;
 
-    // 검은색/회색 배경 정밀 후처리
+    // 모델이 만든 알파 매트를 보수적으로 정리한다. 차량 내부를 임의로
+    // 불투명하게 만들거나 하단을 형태 규칙으로 잘라내면 창문·휠·범퍼가
+    // 손상되므로, 가장 큰 연결 성분과 실제 알파 신뢰도만 사용한다.
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const offset = (y * width + x) * 4;
         const alpha = original[offset + 3];
         const componentIndex = Math.floor(y / component.step) * component.gridWidth + Math.floor(x / component.step);
-        
-        // 차체 본체 내부(Subject Center) 어두운 영역 보존 (검은색 차체, 휠/타이어)
-        const inCoreVehicleArea = x >= minX + subjectWidth * 0.15 && x <= maxX - subjectWidth * 0.15 &&
-                                  y >= minY + subjectHeight * 0.15 && y <= maxY - subjectHeight * 0.15;
-        if (inCoreVehicleArea && alpha > 35) {
-          // 차체 내부에서 어두운 픽셀 알파 복원
-          pixels[offset + 3] = Math.max(alpha, 240);
-          continue;
-        }
 
         if (!component.keep[componentIndex]) {
           pixels[offset + 3] = 0;
@@ -523,15 +516,19 @@ async function refineCutout(blob: Blob): Promise<Blob> {
           pixels[offset + 3] = 0;
           continue;
         }
-        if (alpha <= 15) {
+        if (alpha <= 18) {
           pixels[offset + 3] = 0;
           continue;
         }
-        if (alpha >= 245) continue;
+        if (alpha >= 244) {
+          pixels[offset + 3] = 255;
+          continue;
+        }
 
         let solidNeighbors = 0;
         let bestOffset = offset;
         let bestAlpha = alpha;
+        const neighborhoodAlpha: number[] = [];
         for (let dy = -2; dy <= 2; dy += 1) {
           const sampleY = y + dy;
           if (sampleY < 0 || sampleY >= height) continue;
@@ -540,33 +537,33 @@ async function refineCutout(blob: Blob): Promise<Blob> {
             if (sampleX < 0 || sampleX >= width) continue;
             const sampleOffset = (sampleY * width + sampleX) * 4;
             const sampleAlpha = original[sampleOffset + 3];
-            if (sampleAlpha > 80) solidNeighbors += 1;
+            neighborhoodAlpha.push(sampleAlpha);
+            if (sampleAlpha > 128) solidNeighbors += 1;
             if (sampleAlpha > bestAlpha) {
               bestAlpha = sampleAlpha;
               bestOffset = sampleOffset;
             }
           }
         }
-        if (solidNeighbors < 4) {
+        if (solidNeighbors < 3) {
           pixels[offset + 3] = 0;
           continue;
         }
 
-        const normalized = Math.max(0, Math.min(1, (alpha - 15) / 225));
+        neighborhoodAlpha.sort((a, b) => a - b);
+        const medianAlpha = neighborhoodAlpha[Math.floor(neighborhoodAlpha.length / 2)] ?? alpha;
+        // 낮은 알파의 벽색 프린지를 줄이되 얇은 안테나·미러·휠 스포크는
+        // 중앙값과 원본 알파 중 높은 값을 사용해 보존한다.
+        const matteAlpha = Math.max(alpha * 0.72, medianAlpha);
+        const normalized = Math.max(0, Math.min(1, (matteAlpha - 38) / 188));
         const smoothAlpha = normalized * normalized * (3 - 2 * normalized);
         pixels[offset + 3] = Math.round(smoothAlpha * 255);
-        const decontaminate = (1 - smoothAlpha) * Math.min(1, bestAlpha / 220) * 0.72;
+        const decontaminate = (1 - smoothAlpha) * Math.min(1, bestAlpha / 210) * 0.88;
         pixels[offset] = Math.round(original[offset] * (1 - decontaminate) + original[bestOffset] * decontaminate);
         pixels[offset + 1] = Math.round(original[offset + 1] * (1 - decontaminate) + original[bestOffset + 1] * decontaminate);
         pixels[offset + 2] = Math.round(original[offset + 2] * (1 - decontaminate) + original[bestOffset + 2] * decontaminate);
       }
     }
-
-    // 차체 루프(천장) 위 붕 떠있는 전광판/글자 조각('En' 등) 감지 및 제거
-    removeRoofArtifacts(pixels, width, height, { minX, maxX, minY, maxY });
-
-    // 촬영장 바닥 잔여물 제거 (턴테이블 곡선, 벽-바닥 경계선)
-    removeFloorArtifacts(pixels, width, height, { minX, maxX, minY, maxY });
 
     context.putImageData(imageData, 0, 0);
     return await new Promise<Blob>((resolve) => canvas.toBlob((result) => resolve(result ?? blob), "image/png"));

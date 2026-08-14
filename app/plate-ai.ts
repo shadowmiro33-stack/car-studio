@@ -97,7 +97,7 @@ function isPlausiblePlateBox(plate: PlateBox, width: number, height: number) {
 }
 
 function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
-  const width = 480;
+  const width = 720;
   const height = Math.max(1, Math.round(width * image.naturalHeight / image.naturalWidth));
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -107,10 +107,10 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
   context.drawImage(image, 0, 0, width, height);
   const pixels = context.getImageData(0, 0, width, height).data;
   const visited = new Uint8Array(width * height);
-  let best: { area: number; left: number; top: number; right: number; bottom: number } | null = null;
+  let best: { area: number; left: number; top: number; right: number; bottom: number; members: number[]; rank: number } | null = null;
   
   // 차체 전면/측면 하단부에 위치하는 Encar 빨간 딜러 플레이트 탐색
-  const yStart = Math.floor(height * 0.25);
+  const yStart = Math.floor(height * 0.32);
   for (let y = yStart; y < height * 0.96; y += 1) {
     for (let x = Math.floor(width * 0.02); x < width * 0.98; x += 1) {
       const start = y * width + x;
@@ -119,9 +119,10 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
       const red = pixels[offset];
       const green = pixels[offset + 1];
       const blue = pixels[offset + 2];
-      // Encar Red 플레이트 색상 조건 완화 (어두운 조명 / 비스듬한 각도 허용)
-      if (!(red > 75 && red > green * 1.15 && red > blue * 1.15)) continue;
+      // 어두운 촬영에서도 동작하되 회색 차체와 테일램프 하이라이트는 제외한다.
+      if (!(red > 82 && red - Math.max(green, blue) > 24 && red > green * 1.22 && red > blue * 1.18)) continue;
       const queue = [start];
+      const members: number[] = [];
       visited[start] = 1;
       let cursor = 0;
       let area = 0;
@@ -133,6 +134,7 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
         const index = queue[cursor++];
         const px = index % width;
         const py = Math.floor(index / width);
+        members.push(index);
         area += 1;
         left = Math.min(left, px); right = Math.max(right, px);
         top = Math.min(top, py); bottom = Math.max(bottom, py);
@@ -143,7 +145,7 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
           if (Math.abs(nx - px) + Math.abs(ny - py) !== 1) continue;
           const no = neighbor * 4;
           const nr = pixels[no], ng = pixels[no + 1], nb = pixels[no + 2];
-          if (nr > 70 && nr > ng * 1.12 && nr > nb * 1.12) {
+          if (nr > 68 && nr - Math.max(ng, nb) > 15 && nr > ng * 1.13 && nr > nb * 1.1) {
             visited[neighbor] = 1;
             queue.push(neighbor);
           }
@@ -156,27 +158,70 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
       const widthRatio = componentWidth / width;
       const heightRatio = componentHeight / height;
       const topRatio = top / height;
+      const centerYRatio = ((top + bottom) / 2) / height;
+      const fillRatio = area / Math.max(1, componentWidth * componentHeight);
+      const centerBonus = 1 - Math.min(1, Math.abs(centerRatio - 0.5) * 1.55);
+      const lowerBonus = Math.max(0, Math.min(1, (centerYRatio - 0.38) / 0.5));
+      const rank = fillRatio * 3 + centerBonus * 0.9 + lowerBonus * 0.45 + Math.min(0.7, area / (width * height) * 45);
       if (
-        area > 25
-        && aspect >= 0.25 && aspect <= 8.5
-        && centerRatio >= 0.03 && centerRatio <= 0.97
-        && topRatio >= 0.25
-        && widthRatio >= 0.015 && widthRatio <= 0.45
-        && heightRatio >= 0.008 && heightRatio <= 0.25
-        && (!best || area > best.area)
-      ) best = { area, left, top, right, bottom };
+        area > 70
+        && aspect >= 1.05 && aspect <= 8.5
+        && centerRatio >= 0.07 && centerRatio <= 0.93
+        && topRatio >= 0.32
+        && widthRatio >= 0.035 && widthRatio <= 0.42
+        && heightRatio >= 0.012 && heightRatio <= 0.18
+        && fillRatio >= 0.2
+        && (!best || rank > best.rank)
+      ) best = { area, left, top, right, bottom, members, rank };
     }
   }
   if (!best) return null;
-  const padX = Math.max(2, (best.right - best.left) * 0.05);
-  const padY = Math.max(2, (best.bottom - best.top) * 0.08);
+  const columnTop = new Map<number, number>();
+  const columnBottom = new Map<number, number>();
+  for (const index of best.members) {
+    const x = index % width;
+    const y = Math.floor(index / width);
+    columnTop.set(x, Math.min(columnTop.get(x) ?? y, y));
+    columnBottom.set(x, Math.max(columnBottom.get(x) ?? y, y));
+  }
+  const fit = (values: Map<number, number>) => {
+    const samples = [...values.entries()].filter(([x]) => x > best!.left + 1 && x < best!.right - 1);
+    if (samples.length < 3) return { slope: 0, intercept: values.values().next().value ?? 0 };
+    const meanX = samples.reduce((sum, [x]) => sum + x, 0) / samples.length;
+    const meanY = samples.reduce((sum, [, y]) => sum + y, 0) / samples.length;
+    let numerator = 0;
+    let denominator = 0;
+    for (const [x, y] of samples) {
+      numerator += (x - meanX) * (y - meanY);
+      denominator += (x - meanX) ** 2;
+    }
+    const slope = denominator ? numerator / denominator : 0;
+    return { slope, intercept: meanY - slope * meanX };
+  };
+  const topLine = fit(columnTop);
+  const bottomLine = fit(columnBottom);
+  const padX = Math.max(2, (best.right - best.left) * 0.035);
+  const padY = Math.max(2, (best.bottom - best.top) * 0.07);
+  const left = Math.max(0, best.left - padX);
+  const right = Math.min(width, best.right + padX);
+  const toSource = (x: number, y: number): PlatePoint => ({
+    x: x / width * image.naturalWidth,
+    y: y / height * image.naturalHeight,
+  });
+  const points = [
+    toSource(left, topLine.slope * left + topLine.intercept - padY),
+    toSource(right, topLine.slope * right + topLine.intercept - padY),
+    toSource(right, bottomLine.slope * right + bottomLine.intercept + padY),
+    toSource(left, bottomLine.slope * left + bottomLine.intercept + padY),
+  ];
   return {
     source: "red-dealer",
-    left: Math.max(0, (best.left - padX) / width * image.naturalWidth),
-    top: Math.max(0, (best.top - padY) / height * image.naturalHeight),
-    right: Math.min(image.naturalWidth, (best.right + padX) / width * image.naturalWidth),
-    bottom: Math.min(image.naturalHeight, (best.bottom + padY) / height * image.naturalHeight),
-    score: Math.min(0.99, 0.75 + best.area / (width * height) * 10),
+    left: Math.min(...points.map((point) => point.x)),
+    top: Math.min(...points.map((point) => point.y)),
+    right: Math.max(...points.map((point) => point.x)),
+    bottom: Math.max(...points.map((point) => point.y)),
+    points,
+    score: Math.min(0.99, 0.78 + best.rank * 0.045),
   };
 }
 
@@ -251,11 +296,20 @@ function boxPoints(box: PlateBox) {
 export async function detectFrontPlate(image: HTMLImageElement): Promise<PlateDetection> {
   const redResult = findRedDealerPlate(image);
   if (redResult && isPlausiblePlateBox(redResult, image.naturalWidth, image.naturalHeight)) {
+    const rearRatio = redLightRatio(image, redResult);
+    if (rearRatio >= 0.005) {
+      return {
+        type: "rear",
+        points: boxPoints(redResult),
+        score: redResult.score,
+        message: "후면 딜러 플레이트로 판단해 자동 교체하지 않았습니다.",
+      };
+    }
     return {
       type: "front",
       points: boxPoints(redResult),
       score: redResult.score,
-      message: "전면 딜러 플레이트를 감지했습니다. 실제 크기와 위치에 맞춰 교체합니다.",
+      message: "전면·측면 딜러 플레이트를 감지했습니다. 기울기와 실제 크기에 맞춰 교체합니다.",
     };
   }
   const ort = await import("onnxruntime-web");
