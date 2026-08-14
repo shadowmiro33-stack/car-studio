@@ -625,6 +625,80 @@ function restoreOriginalFloor(
   context.drawImage(floorCanvas, 0, 0);
 }
 
+function blendWallOnly(
+  context: CanvasRenderingContext2D,
+  replacement: HTMLCanvasElement,
+  foreground: HTMLImageElement,
+  width: number,
+  height: number,
+  horizonRatio: number,
+) {
+  const maskCanvas = document.createElement("canvas");
+  maskCanvas.width = width;
+  maskCanvas.height = height;
+  const maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
+  if (!maskContext) return;
+  maskContext.drawImage(foreground, 0, 0, width, height);
+  const foregroundPixels = maskContext.getImageData(0, 0, width, height).data;
+  const sourceAlpha = new Uint8Array(width * height);
+  for (let index = 0; index < sourceAlpha.length; index += 1) sourceAlpha[index] = foregroundPixels[index * 4 + 3];
+
+  // 차량 경계 주변을 몇 픽셀 넓게 보호해 흰색/회색 벽색이 차체 외곽으로
+  // 파고드는 현상을 막는다. 두 번의 1차원 최대값 필터로 빠르게 팽창한다.
+  const radius = Math.max(2, Math.round(Math.max(width, height) / 720));
+  const horizontal = new Uint8Array(sourceAlpha.length);
+  const protectedAlpha = new Uint8Array(sourceAlpha.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let maximum = 0;
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const sampleX = x + dx;
+        if (sampleX >= 0 && sampleX < width) maximum = Math.max(maximum, sourceAlpha[y * width + sampleX]);
+      }
+      horizontal[y * width + x] = maximum;
+    }
+  }
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let maximum = 0;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const sampleY = y + dy;
+        if (sampleY >= 0 && sampleY < height) maximum = Math.max(maximum, horizontal[sampleY * width + x]);
+      }
+      protectedAlpha[y * width + x] = maximum;
+    }
+  }
+
+  const horizon = height * horizonRatio;
+  const transition = Math.max(18, height * 0.055);
+  const wallMask = maskContext.createImageData(width, height);
+  for (let y = 0; y < height; y += 1) {
+    const floorProtection = Math.max(0, Math.min(1, (horizon - y) / transition));
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const confidence = Math.max(0, Math.min(1, (92 - protectedAlpha[index]) / 78));
+      const smoothConfidence = confidence * confidence * (3 - 2 * confidence);
+      const offset = index * 4;
+      wallMask.data[offset] = 255;
+      wallMask.data[offset + 1] = 255;
+      wallMask.data[offset + 2] = 255;
+      wallMask.data[offset + 3] = Math.round(255 * smoothConfidence * floorProtection);
+    }
+  }
+  maskContext.putImageData(wallMask, 0, 0);
+
+  const wallCanvas = document.createElement("canvas");
+  wallCanvas.width = width;
+  wallCanvas.height = height;
+  const wallContext = wallCanvas.getContext("2d");
+  if (!wallContext) return;
+  wallContext.drawImage(replacement, 0, 0);
+  wallContext.globalCompositeOperation = "destination-in";
+  wallContext.drawImage(maskCanvas, 0, 0);
+  wallContext.globalCompositeOperation = "source-over";
+  context.drawImage(wallCanvas, 0, 0);
+}
+
 function drawImageCover(
   context: CanvasRenderingContext2D,
   image: HTMLImageElement,
@@ -774,15 +848,23 @@ export default function Home() {
     setDetectedScene("studio");
     const effectiveScene: SceneKind = "studio";
     const renderBackdrop: Backdrop = backdrop;
-    drawStudioBackdrop(context, width, height, backdrop);
+    const preserveFloor = ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
+    const replacementCanvas = document.createElement("canvas");
+    replacementCanvas.width = width;
+    replacementCanvas.height = height;
+    const replacementContext = replacementCanvas.getContext("2d");
+    if (!replacementContext) throw new Error("스튜디오 배경을 만들지 못했습니다.");
+    drawStudioBackdrop(replacementContext, width, height, backdrop);
     if (wallStripEnabled) {
       const stripSource = await loadImage("/autoinside-wall-strip.png");
-      drawWallStrip(context, createTransparentWallStrip(stripSource), width, height, wallStrip);
+      drawWallStrip(replacementContext, createTransparentWallStrip(stripSource), width, height, wallStrip);
     }
-    const preserveFloor = ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
     if (preserveFloor) {
       const floorHorizon = estimateFloorHorizon(sourceImage, image);
-      restoreOriginalFloor(context, sourceImage, width, height, floorHorizon);
+      context.drawImage(sourceImage, 0, 0, width, height);
+      blendWallOnly(context, replacementCanvas, image, width, height, floorHorizon);
+    } else {
+      context.drawImage(replacementCanvas, 0, 0);
     }
 
     const bounds = getSubjectBounds(image);
@@ -846,12 +928,14 @@ export default function Home() {
       context.restore();
     }
 
-    context.save();
-    context.filter = renderBackdrop === "graphite"
-      ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
-      : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
-    context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
-    context.restore();
+    if (!preserveFloor) {
+      context.save();
+      context.filter = renderBackdrop === "graphite"
+        ? "drop-shadow(0 2px 2px rgba(0,0,0,.38)) brightness(1.05) contrast(1.025) saturate(.96)"
+        : "drop-shadow(0 2px 2px rgba(0,0,0,.2)) brightness(1.015) contrast(1.025) saturate(.95)";
+      context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
+      context.restore();
+    }
 
     const renderedPlatePoints = overlayPoints.length === 4 ? overlayPoints.map((point) => overlayCoordinates === "canvas" ? {
       x: point.x * width,
