@@ -310,6 +310,62 @@ function largestAlphaComponent(pixels: Uint8ClampedArray, width: number, height:
 }
 
 /**
+ * 차량 루프(천장) 라인 위에 붕 떠서 남아있는 배경 전광판/글자 조각('En' 등)을 감지 및 제거합니다.
+ */
+function removeRoofArtifacts(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  subjectBounds: { minX: number; maxX: number; minY: number; maxY: number },
+): void {
+  const subjectWidth = subjectBounds.maxX - subjectBounds.minX;
+  const subjectHeight = subjectBounds.maxY - subjectBounds.minY;
+  if (subjectWidth < 10 || subjectHeight < 10) return;
+
+  // 차체 루프 라인 추정: 상단 25% 영역에서 가로 폭이 넓어지는 지점
+  const roofScanYEnd = subjectBounds.minY + subjectHeight * 0.35;
+  let estimatedRoofY = subjectBounds.minY;
+
+  for (let y = subjectBounds.minY; y <= roofScanYEnd; y += 2) {
+    let rowWidth = 0;
+    let firstX = -1;
+    let lastX = -1;
+    for (let x = subjectBounds.minX; x <= subjectBounds.maxX; x += 2) {
+      if (pixels[(y * width + x) * 4 + 3] > 120) {
+        if (firstX < 0) firstX = x;
+        lastX = x;
+      }
+    }
+    if (firstX >= 0 && lastX >= firstX) {
+      rowWidth = lastX - firstX + 1;
+      // 가로 폭이 차체 폭의 40% 이상 넓어지면 실제 차체 루프라인으로 판단
+      if (rowWidth > subjectWidth * 0.4) {
+        estimatedRoofY = y;
+        break;
+      }
+    }
+  }
+
+  // 추정된 루프라인보다 위쪽에 위치하면서, 폭이 좁은 독립 구조물('En' 등) 제거
+  for (let y = 0; y < estimatedRoofY; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      if (pixels[idx + 3] > 50) {
+        // 수평 연속 폭 확인
+        let leftX = x, rightX = x;
+        while (leftX > 0 && pixels[(y * width + leftX - 1) * 4 + 3] > 50) leftX--;
+        while (rightX < width - 1 && pixels[(y * width + rightX + 1) * 4 + 3] > 50) rightX++;
+        const componentWidth = rightX - leftX + 1;
+        // 폭이 차체 폭의 30%보다 좁은 상단 노이즈 제거
+        if (componentWidth < subjectWidth * 0.3) {
+          pixels[idx + 3] = 0;
+        }
+      }
+    }
+  }
+}
+
+/**
  * 차량 마스크 하단부에서 촬영장 바닥 잔여물을 제거합니다.
  * - 턴테이블 곡선 조각: 차체 양측 밖으로 뻗은 얇은 구조
  * - 벽-바닥 경계선: 수평으로 길고 수직 두께가 얇은 구조
@@ -505,6 +561,9 @@ async function refineCutout(blob: Blob): Promise<Blob> {
         pixels[offset + 2] = Math.round(original[offset + 2] * (1 - decontaminate) + original[bestOffset + 2] * decontaminate);
       }
     }
+
+    // 차체 루프(천장) 위 붕 떠있는 전광판/글자 조각('En' 등) 감지 및 제거
+    removeRoofArtifacts(pixels, width, height, { minX, maxX, minY, maxY });
 
     // 촬영장 바닥 잔여물 제거 (턴테이블 곡선, 벽-바닥 경계선)
     removeFloorArtifacts(pixels, width, height, { minX, maxX, minY, maxY });

@@ -108,17 +108,19 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
   const pixels = context.getImageData(0, 0, width, height).data;
   const visited = new Uint8Array(width * height);
   let best: { area: number; left: number; top: number; right: number; bottom: number } | null = null;
-  // 측면 사진에서는 번호판이 더 위쪽/가장자리에 위치할 수 있으므로 탐색 범위 확대
-  const yStart = Math.floor(height * 0.3);
-  for (let y = yStart; y < height * 0.95; y += 1) {
-    for (let x = Math.floor(width * 0.03); x < width * 0.97; x += 1) {
+  
+  // 차체 전면/측면 하단부에 위치하는 Encar 빨간 딜러 플레이트 탐색
+  const yStart = Math.floor(height * 0.25);
+  for (let y = yStart; y < height * 0.96; y += 1) {
+    for (let x = Math.floor(width * 0.02); x < width * 0.98; x += 1) {
       const start = y * width + x;
       if (visited[start]) continue;
       const offset = start * 4;
       const red = pixels[offset];
       const green = pixels[offset + 1];
       const blue = pixels[offset + 2];
-      if (!(red > 85 && red > green * 1.28 && red > blue * 1.22)) continue;
+      // Encar Red 플레이트 색상 조건 완화 (어두운 조명 / 비스듬한 각도 허용)
+      if (!(red > 75 && red > green * 1.15 && red > blue * 1.15)) continue;
       const queue = [start];
       visited[start] = 1;
       let cursor = 0;
@@ -141,7 +143,7 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
           if (Math.abs(nx - px) + Math.abs(ny - py) !== 1) continue;
           const no = neighbor * 4;
           const nr = pixels[no], ng = pixels[no + 1], nb = pixels[no + 2];
-          if (nr > 85 && nr > ng * 1.28 && nr > nb * 1.22) {
+          if (nr > 70 && nr > ng * 1.12 && nr > nb * 1.12) {
             visited[neighbor] = 1;
             queue.push(neighbor);
           }
@@ -155,18 +157,18 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
       const heightRatio = componentHeight / height;
       const topRatio = top / height;
       if (
-        area > 50
-        && aspect >= 0.5 && aspect <= 6.5
-        && centerRatio >= 0.06 && centerRatio <= 0.94
-        && topRatio >= 0.32
-        && widthRatio >= 0.02 && widthRatio <= 0.34
-        && heightRatio >= 0.012 && heightRatio <= 0.18
+        area > 25
+        && aspect >= 0.25 && aspect <= 8.5
+        && centerRatio >= 0.03 && centerRatio <= 0.97
+        && topRatio >= 0.25
+        && widthRatio >= 0.015 && widthRatio <= 0.45
+        && heightRatio >= 0.008 && heightRatio <= 0.25
         && (!best || area > best.area)
       ) best = { area, left, top, right, bottom };
     }
   }
   if (!best) return null;
-  const padX = Math.max(2, (best.right - best.left) * 0.04);
+  const padX = Math.max(2, (best.right - best.left) * 0.05);
   const padY = Math.max(2, (best.bottom - best.top) * 0.08);
   return {
     source: "red-dealer",
@@ -174,7 +176,7 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
     top: Math.max(0, (best.top - padY) / height * image.naturalHeight),
     right: Math.min(image.naturalWidth, (best.right + padX) / width * image.naturalWidth),
     bottom: Math.min(image.naturalHeight, (best.bottom + padY) / height * image.naturalHeight),
-    score: Math.min(0.99, 0.65 + best.area / (width * height) * 8),
+    score: Math.min(0.99, 0.75 + best.area / (width * height) * 10),
   };
 }
 
