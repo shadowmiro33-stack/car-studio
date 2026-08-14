@@ -2,13 +2,19 @@
 
 import { ChangeEvent, DragEvent, MouseEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { detectFrontPlate, drawPerspectivePlate, type PlateDetection, type PlatePoint } from "./plate-ai";
+import { blankPlateRegion, removeDisplayStickers, removeGlassReflections, type CleanupResult } from "./encar-cleanup";
 import JSZip from "jszip";
 
 type Backdrop = "studio" | "warm" | "graphite";
 type Ratio = "original" | "16:9" | "4:3" | "1:1";
 type SceneKind = "studio";
 type PlateCoordinates = "source" | "canvas";
+type PlateAction = "replace" | "blank" | "none";
 type WallStripPlacement = { x: number; y: number; scale: number };
+type EncarCleanupOptions = {
+  stickerRemoval: boolean;
+  glassReflection: boolean;
+};
 
 const backdropNames: Record<Backdrop, string> = {
   studio: "화이트 스튜디오",
@@ -300,6 +306,114 @@ function largestAlphaComponent(pixels: Uint8ClampedArray, width: number, height:
   return { keep, step, gridWidth };
 }
 
+/**
+ * 차량 마스크 하단부에서 촬영장 바닥 잔여물을 제거합니다.
+ * - 턴테이블 곡선 조각: 차체 양측 밖으로 뻗은 얇은 구조
+ * - 벽-바닥 경계선: 수평으로 길고 수직 두께가 얇은 구조
+ * - 타이어와 차체 본체는 보호
+ */
+function removeFloorArtifacts(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  subjectBounds: { minX: number; maxX: number; minY: number; maxY: number },
+): void {
+  const subjectWidth = subjectBounds.maxX - subjectBounds.minX;
+  const subjectHeight = subjectBounds.maxY - subjectBounds.minY;
+  if (subjectWidth < 10 || subjectHeight < 10) return;
+
+  // 차체 본체 영역 (좌우 15% 안쪽, 상하 보호)
+  const bodyLeft = subjectBounds.minX + subjectWidth * 0.12;
+  const bodyRight = subjectBounds.maxX - subjectWidth * 0.12;
+  // 하단 30% 영역만 검사 (바닥 잔여물이 있는 곳)
+  const scanTop = subjectBounds.maxY - subjectHeight * 0.32;
+  // 타이어 보호 영역: 차체 폭의 15~85% 범위, 하단 근처
+  const tireLeftZone = subjectBounds.minX + subjectWidth * 0.08;
+  const tireRightZone = subjectBounds.maxX - subjectWidth * 0.08;
+  const tireTopZone = subjectBounds.maxY - subjectHeight * 0.18;
+
+  // 1단계: 각 열(column)에서 하단부의 불투명 수직 연속 길이 측정
+  const thicknessThreshold = Math.max(6, subjectHeight * 0.05);
+
+  for (let x = 0; x < width; x++) {
+    // 차체 본체 내부이고 타이어 영역이면 보호
+    const inBodyRange = x >= bodyLeft && x <= bodyRight;
+    const inTireZone = x >= tireLeftZone && x <= tireRightZone;
+
+    // 하단부에서 위로 스캔하며 불투명 픽셀 연속 길이 측정
+    let runStart = -1;
+    let runLength = 0;
+
+    for (let y = height - 1; y >= Math.max(0, Math.floor(scanTop)); y--) {
+      const alpha = pixels[(y * width + x) * 4 + 3];
+      if (alpha > 80) {
+        if (runStart < 0) runStart = y;
+        runLength++;
+      } else {
+        if (runLength > 0 && runLength < thicknessThreshold) {
+          // 얇은 구조 발견
+          // 차체 본체 안이면서 타이어 영역이면 보호
+          if (inBodyRange && inTireZone && runStart >= tireTopZone) {
+            // 타이어 접지부 보호
+          } else if (!inBodyRange || runLength < thicknessThreshold * 0.6) {
+            // 차체 밖이거나 매우 얇은 경우 제거
+            for (let ry = runStart; ry > runStart - runLength; ry--) {
+              if (ry >= 0 && ry < height) {
+                const offset = (ry * width + x) * 4;
+                // 페더링: 경계를 부드럽게
+                const distFromEdge = Math.min(ry - (runStart - runLength), runStart - ry);
+                const fade = Math.min(1, distFromEdge / 2);
+                pixels[offset + 3] = Math.round(pixels[offset + 3] * (1 - fade));
+              }
+            }
+          }
+        }
+        runStart = -1;
+        runLength = 0;
+      }
+    }
+  }
+
+  // 2단계: 수평 경계선 감지 및 제거
+  // 마스크 하단 영역에서 수평 run-length가 차체 폭의 85% 이상이고
+  // 수직 두께가 얇은(< 10px) 구조 탐지
+  for (let y = Math.max(0, Math.floor(scanTop)); y < height; y++) {
+    let horizontalRun = 0;
+    let runStartX = -1;
+
+    for (let x = 0; x < width; x++) {
+      if (pixels[(y * width + x) * 4 + 3] > 80) {
+        if (runStartX < 0) runStartX = x;
+        horizontalRun++;
+      } else {
+        if (horizontalRun > subjectWidth * 0.85) {
+          // 긴 수평 선 발견 — 수직 두께 확인
+          let verticalThickness = 0;
+          for (let vy = Math.max(0, y - 8); vy <= Math.min(height - 1, y + 8); vy++) {
+            const midX = Math.floor((runStartX + x) / 2);
+            if (pixels[(vy * width + midX) * 4 + 3] > 80) verticalThickness++;
+          }
+          if (verticalThickness < 10) {
+            // 얇은 수평선 제거 (타이어 보호 영역 제외)
+            for (let rx = runStartX; rx < x; rx++) {
+              const inTire = rx >= tireLeftZone && rx <= tireRightZone && y >= tireTopZone;
+              if (inTire) continue;
+              for (let vy = Math.max(0, y - 2); vy <= Math.min(height - 1, y + 2); vy++) {
+                const offset = (vy * width + rx) * 4;
+                if (pixels[offset + 3] > 80) {
+                  pixels[offset + 3] = 0;
+                }
+              }
+            }
+          }
+        }
+        horizontalRun = 0;
+        runStartX = -1;
+      }
+    }
+  }
+}
+
 async function refineCutout(blob: Blob): Promise<Blob> {
   const source = URL.createObjectURL(blob);
   try {
@@ -388,6 +502,9 @@ async function refineCutout(blob: Blob): Promise<Blob> {
       }
     }
 
+    // 촬영장 바닥 잔여물 제거 (턴테이블 곡선, 벽-바닥 경계선)
+    removeFloorArtifacts(pixels, width, height, { minX, maxX, minY, maxY });
+
     context.putImageData(imageData, 0, 0);
     return await new Promise<Blob>((resolve) => canvas.toBlob((result) => resolve(result ?? blob), "image/png"));
   } finally {
@@ -436,7 +553,7 @@ function restoreOriginalFloor(
 
   floorContext.drawImage(source, 0, 0, width, height);
   const horizon = height * horizonRatio;
-  const feather = height * 0.018;
+  const feather = height * 0.025;
   const mask = floorContext.createLinearGradient(0, horizon - feather, 0, horizon + feather);
   mask.addColorStop(0, "rgba(0,0,0,0)");
   mask.addColorStop(0.48, "rgba(0,0,0,.08)");
@@ -533,6 +650,9 @@ export default function Home() {
   const [wallStripEnabled, setWallStripEnabled] = useState(true);
   const [wallStrip, setWallStrip] = useState<WallStripPlacement>({ x: 0.5, y: 0.14, scale: 1.04 });
   const [draggingWallStrip, setDraggingWallStrip] = useState(false);
+  const [plateAction, setPlateAction] = useState<PlateAction>("replace");
+  const [encarCleanup, setEncarCleanup] = useState<EncarCleanupOptions>({ stickerRemoval: true, glassReflection: true });
+  const [cleanupMessage, setCleanupMessage] = useState("");
   const [stageAspect, setStageAspect] = useState(16 / 9);
   const inputRef = useRef<HTMLInputElement>(null);
   const objectUrlsRef = useRef<Set<string>>(new Set());
@@ -563,7 +683,7 @@ export default function Home() {
     const timer = window.setTimeout(() => { void composeResult(foregroundUrl, sequence); }, 140);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, wallStripEnabled, wallStrip]);
+  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, wallStripEnabled, wallStrip, plateAction, encarCleanup]);
 
   async function composeImage(
     foreground: string,
@@ -680,9 +800,49 @@ export default function Home() {
       x: drawX + ((point.x * image.width - bounds.x) / bounds.width) * drawWidth,
       y: drawY + ((point.y * image.height - bounds.y) / bounds.height) * drawHeight,
     }) : [];
+
+    // 번호판 처리: plateAction에 따라 교체 또는 블랭킹
     if (renderedPlatePoints.length === 4) {
-      const logo = await loadImage("/autoinside-plate-logo.png");
-      drawPerspectivePlate(context, logo, renderedPlatePoints);
+      if (plateAction === "replace") {
+        const logo = await loadImage("/autoinside-plate-logo.png");
+        drawPerspectivePlate(context, logo, renderedPlatePoints);
+      } else if (plateAction === "blank") {
+        blankPlateRegion(context, renderedPlatePoints, width, height);
+      }
+    }
+
+    // 엔카 브랜딩 제거
+    const cleanupMessages: string[] = [];
+    if (encarCleanup.stickerRemoval || encarCleanup.glassReflection) {
+      const maskCanvas = document.createElement("canvas");
+      maskCanvas.width = width;
+      maskCanvas.height = height;
+      const maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
+      if (maskContext) {
+        maskContext.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
+        const foregroundMaskData = maskContext.getImageData(0, 0, width, height).data;
+
+        if (encarCleanup.stickerRemoval) {
+          const stickerCanvas = document.createElement("canvas");
+          stickerCanvas.width = width;
+          stickerCanvas.height = height;
+          const stickerContext = stickerCanvas.getContext("2d", { willReadFrequently: true });
+          if (stickerContext) {
+            stickerContext.drawImage(sourceImage, 0, 0, width, height);
+            const stickerResult = removeDisplayStickers(stickerContext, foregroundMaskData, width, height);
+            if (stickerResult.removed > 0 || stickerResult.uncertain > 0) {
+              cleanupMessages.push(stickerResult.message);
+            }
+          }
+        }
+
+        if (encarCleanup.glassReflection) {
+          const glassResult = removeGlassReflections(context, foregroundMaskData, width, height);
+          if (glassResult.removed > 0 || glassResult.uncertain > 0) {
+            cleanupMessages.push(glassResult.message);
+          }
+        }
+      }
     }
 
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.94));
@@ -690,7 +850,9 @@ export default function Home() {
     return {
       blob,
       renderedPlatePoints: renderedPlatePoints.map((point) => ({ x: point.x / width, y: point.y / height })),
+      cleanupMessages,
     };
+
   }
 
   async function composeResult(foreground: string, sequence = ++composeSequenceRef.current) {
@@ -699,6 +861,11 @@ export default function Home() {
     if (plateCoordinates === "source" && composed.renderedPlatePoints.length === 4) {
       setPlateCoordinates("canvas");
       setPlatePoints(composed.renderedPlatePoints);
+    }
+    if (composed.cleanupMessages?.length) {
+      setCleanupMessage(composed.cleanupMessages.join(" · "));
+    } else {
+      setCleanupMessage("");
     }
     const nextUrl = createTrackedUrl(composed.blob);
     setResultUrl((old) => {
@@ -1068,16 +1235,46 @@ export default function Home() {
               </div>
             )}
           </div>
+          <div className="encar-cleanup-tools">
+            <label className="label">엔카 브랜딩 정리 옵션</label>
+            <div className="cleanup-checkboxes">
+              <label className="cleanup-toggle">
+                <input
+                  type="checkbox"
+                  checked={encarCleanup.stickerRemoval}
+                  onChange={(e) => setEncarCleanup((prev) => ({ ...prev, stickerRemoval: e.target.checked }))}
+                />
+                <span><strong>전광판 스티커 제거</strong><small>촬영장 벽면의 엔카 로고/스티커 메움</small></span>
+              </label>
+              <label className="cleanup-toggle">
+                <input
+                  type="checkbox"
+                  checked={encarCleanup.glassReflection}
+                  onChange={(e) => setEncarCleanup((prev) => ({ ...prev, glassReflection: e.target.checked }))}
+                />
+                <span><strong>유리 반사 텍스트 제거</strong><small>유리창에 비친 엔카 텍스트 블렌딩</small></span>
+              </label>
+            </div>
+          </div>
+          <div className="plate-action-group">
+            <label className="label">번호판 처리 방식</label>
+            <div className="segments plate-mode-segments">
+              <button className={plateAction === "replace" ? "active" : ""} onClick={() => setPlateAction("replace")}>오토인사이드 교체</button>
+              <button className={plateAction === "blank" ? "active" : ""} onClick={() => setPlateAction("blank")}>번호판 지우기</button>
+              <button className={plateAction === "none" ? "active" : ""} onClick={() => setPlateAction("none")}>원본 유지</button>
+            </div>
+          </div>
           <div className="plate-tools">
-          <button className="plate-button" disabled={!resultUrl || plateStatus === "working"} onClick={runPlateAi}>
-            <span>AI</span><span><strong>전면 번호판 자동 교체</strong><small>전면으로 확실할 때만 Autoinside 번호판 적용</small></span>
-          </button>
-          <button className={`plate-button ${plateMode ? "active" : ""}`} disabled={!resultUrl} onClick={startManualPlate}>
-            <span>4P</span><span><strong>번호판 직접 지정</strong><small>{platePoints.length ? `${platePoints.length}/4 지점 지정됨` : "네 모서리를 순서대로 선택"}</small></span>
-          </button>
+            <button className="plate-button" disabled={!resultUrl || plateStatus === "working"} onClick={runPlateAi}>
+              <span>AI</span><span><strong>전면 번호판 자동 감지</strong><small>전면으로 확실할 때만 번호판 좌표 감지</small></span>
+            </button>
+            <button className={`plate-button ${plateMode ? "active" : ""}`} disabled={!resultUrl} onClick={startManualPlate}>
+              <span>4P</span><span><strong>번호판 직접 지정</strong><small>{platePoints.length ? `${platePoints.length}/4 지점 지정됨` : "네 모서리를 순서대로 선택"}</small></span>
+            </button>
 
-          <p className={`plate-status ${plateStatus}`}>{plateMessage}</p>
-          {platePoints.length === 4 && <button className="text-button" onClick={() => { setPlatePoints([]); setPlateStatus("idle"); setPlateMessage("번호판 교체를 해제했습니다."); }}>번호판 교체 해제</button>}
+            <p className={`plate-status ${plateStatus}`}>{plateMessage}</p>
+            {cleanupMessage && <p className="cleanup-status-note">✨ {cleanupMessage}</p>}
+            {platePoints.length === 4 && <button className="text-button" onClick={() => { setPlatePoints([]); setPlateStatus("idle"); setPlateMessage("번호판 처리를 해제했습니다."); }}>번호판 지정 해제</button>}
           </div>
 
           <button className="primary" disabled={!sourceUrl || status === "working"} onClick={runAi}>
@@ -1169,7 +1366,14 @@ export default function Home() {
                       {result ? <img src={result.afterUrl} alt={`${file.name} 변환 결과`} /> : <div className="batch-placeholder">{batchStatus === "working" ? "변환 대기 중" : "전체 사진 원클릭 변환을 눌러주세요"}</div>}
                     </figure>
                   </div>
-                  <div className="batch-card-meta"><strong>{file.name}</strong><small>{result?.plate ?? "원본 준비됨"}</small>{result && <button onClick={() => setDetailIndex(index)}>상세보기</button>}</div>
+                  <div className="batch-card-meta">
+                    <strong>{file.name}</strong>
+                    <div className="batch-card-status-col">
+                      {result?.plate.includes("검수 필요") && <span className="review-badge">검수 필요</span>}
+                      <small>{result?.plate ?? "원본 준비됨"}</small>
+                    </div>
+                    {result && <button onClick={() => setDetailIndex(index)}>상세보기</button>}
+                  </div>
                 </article>
               );
             })}

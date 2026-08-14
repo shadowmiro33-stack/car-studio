@@ -84,10 +84,11 @@ function isPlausiblePlateBox(plate: PlateBox, width: number, height: number) {
   const aspectRatio = plateWidth / Math.max(1, plateHeight);
   const areaRatio = (plateWidth * plateHeight) / (width * height);
   const redDealer = plate.source === "red-dealer";
-  return aspectRatio >= (redDealer ? 1.15 : 1.8) && aspectRatio <= 7
-    && areaRatio >= 0.0025 && areaRatio <= (redDealer ? 0.08 : 0.03)
-    && plate.left >= width * 0.05 && plate.right <= width * 0.95
-    && plate.top >= height * 0.3 && plate.bottom <= height * (redDealer ? 0.97 : 0.88);
+  // 측면 사진에서 번호판이 원근 변환되어 종횡비가 낮아지고 가장자리에 위치할 수 있음
+  return aspectRatio >= (redDealer ? 0.5 : 1.8) && aspectRatio <= 7
+    && areaRatio >= (redDealer ? 0.0008 : 0.0025) && areaRatio <= (redDealer ? 0.08 : 0.03)
+    && plate.left >= width * 0.02 && plate.right <= width * 0.98
+    && plate.top >= height * 0.2 && plate.bottom <= height * (redDealer ? 0.97 : 0.88);
 }
 
 function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
@@ -102,9 +103,10 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
   const pixels = context.getImageData(0, 0, width, height).data;
   const visited = new Uint8Array(width * height);
   let best: { area: number; left: number; top: number; right: number; bottom: number } | null = null;
-  const yStart = Math.floor(height * 0.44);
-  for (let y = yStart; y < height * 0.92; y += 1) {
-    for (let x = Math.floor(width * 0.08); x < width * 0.92; x += 1) {
+  // 측면 사진에서는 번호판이 더 위쪽/가장자리에 위치할 수 있으므로 탐색 범위 확대
+  const yStart = Math.floor(height * 0.3);
+  for (let y = yStart; y < height * 0.95; y += 1) {
+    for (let x = Math.floor(width * 0.03); x < width * 0.97; x += 1) {
       const start = y * width + x;
       if (visited[start]) continue;
       const offset = start * 4;
@@ -148,12 +150,12 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
       const heightRatio = componentHeight / height;
       const topRatio = top / height;
       if (
-        area > 90
-        && aspect >= 1.35 && aspect <= 6.5
-        && centerRatio >= 0.3 && centerRatio <= 0.7
-        && topRatio >= 0.58
-        && widthRatio >= 0.055 && widthRatio <= 0.34
-        && heightRatio >= 0.018 && heightRatio <= 0.13
+        area > 50
+        && aspect >= 0.5 && aspect <= 6.5
+        && centerRatio >= 0.06 && centerRatio <= 0.94
+        && topRatio >= 0.32
+        && widthRatio >= 0.02 && widthRatio <= 0.34
+        && heightRatio >= 0.012 && heightRatio <= 0.18
         && (!best || area > best.area)
       ) best = { area, left, top, right, bottom };
     }
@@ -192,6 +194,9 @@ function redLightRatio(image: HTMLImageElement, excludedPlate: PlateBox) {
     bottom: excludedPlate.bottom / image.naturalHeight * height + 4,
   };
   let redPixels = 0;
+  // 추가: 차량 양 끝 영역(좌측 25%와 우측 25%)의 테일라이트 집중도
+  let edgeRedPixels = 0;
+  let edgeTotal = 0;
   for (let y = yStart; y < yEnd; y += 1) {
     for (let x = xStart; x < xEnd; x += 1) {
       if (x >= excluded.left && x <= excluded.right && y >= excluded.top && y <= excluded.bottom) continue;
@@ -199,10 +204,32 @@ function redLightRatio(image: HTMLImageElement, excludedPlate: PlateBox) {
       const red = pixels[offset];
       const green = pixels[offset + 1];
       const blue = pixels[offset + 2];
-      if (red > 120 && red > green * 1.4 && red > blue * 1.4) redPixels += 1;
+      const isRed = red > 120 && red > green * 1.4 && red > blue * 1.4;
+      if (isRed) redPixels += 1;
+      // 양 끝 영역 집중도 체크 (테일라이트는 양 끝에 집중)
+      const inEdge = x < xStart + (xEnd - xStart) * 0.25 || x > xEnd - (xEnd - xStart) * 0.25;
+      if (inEdge) {
+        edgeTotal++;
+        if (isRed) edgeRedPixels++;
+      }
     }
   }
-  return redPixels / ((xEnd - xStart) * (yEnd - yStart));
+  const totalArea = (xEnd - xStart) * (yEnd - yStart);
+  const overallRatio = redPixels / totalArea;
+  const edgeRatio = edgeTotal > 0 ? edgeRedPixels / edgeTotal : 0;
+
+  // 번호판 수직 위치 분석: 후면 번호판은 보통 더 낮은 위치
+  const plateVerticalCenter = (excludedPlate.top + excludedPlate.bottom) / 2 / image.naturalHeight;
+  const lowPlateBonus = plateVerticalCenter > 0.7 ? 0.003 : 0;
+
+  // 차량 중심선 대비 번호판 수평 오프셋 (측후면 판별)
+  const plateCenterX = (excludedPlate.left + excludedPlate.right) / 2 / image.naturalWidth;
+  const offsetBonus = Math.abs(plateCenterX - 0.5) > 0.2 ? 0.002 : 0;
+
+  // 테일라이트 양 끝 집중 보너스
+  const edgeConcentrationBonus = edgeRatio > overallRatio * 2 ? 0.002 : 0;
+
+  return overallRatio + lowPlateBonus + offsetBonus + edgeConcentrationBonus;
 }
 
 function boxPoints(box: PlateBox) {
