@@ -625,6 +625,55 @@ function restoreOriginalFloor(
   context.drawImage(floorCanvas, 0, 0);
 }
 
+function shouldProcessPlateOnly(image: HTMLImageElement) {
+  const width = 120;
+  const height = Math.max(60, Math.round(width * image.naturalHeight / image.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return false;
+  context.drawImage(image, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  let samples = 0;
+  let transparent = 0;
+  let white = 0;
+  let neutral = 0;
+  let chromatic = 0;
+  let strongEdges = 0;
+
+  for (let y = 0; y < height * 0.62; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const borderSample = y < height * 0.28 || x < width * 0.13 || x > width * 0.87;
+      if (!borderSample) continue;
+      const offset = (y * width + x) * 4;
+      const alpha = pixels[offset + 3];
+      const r = pixels[offset];
+      const g = pixels[offset + 1];
+      const b = pixels[offset + 2];
+      const spread = Math.max(r, g, b) - Math.min(r, g, b);
+      samples += 1;
+      if (alpha < 32) transparent += 1;
+      if (r > 235 && g > 235 && b > 235 && spread < 20) white += 1;
+      if (spread < 24) neutral += 1;
+      if (spread > 55) chromatic += 1;
+      if (x > 0) {
+        const previous = offset - 4;
+        const difference = Math.abs(r - pixels[previous]) + Math.abs(g - pixels[previous + 1]) + Math.abs(b - pixels[previous + 2]);
+        if (difference > 150) strongEdges += 1;
+      }
+    }
+  }
+
+  if (!samples) return false;
+  if (transparent / samples > 0.04) return true;
+  const whiteRatio = white / samples;
+  const neutralRatio = neutral / samples;
+  const chromaticRatio = chromatic / samples;
+  const edgeRatio = strongEdges / samples;
+  return whiteRatio > 0.78 && neutralRatio > 0.9 && chromaticRatio < 0.04 && edgeRatio < 0.06;
+}
+
 function blendWallOnly(
   context: CanvasRenderingContext2D,
   replacement: HTMLCanvasElement,
@@ -786,6 +835,7 @@ export default function Home() {
   const [draggingWallStrip, setDraggingWallStrip] = useState(false);
   const [plateAction, setPlateAction] = useState<PlateAction>("replace");
   const [encarCleanup, setEncarCleanup] = useState<EncarCleanupOptions>({ stickerRemoval: true, glassReflection: true });
+  const [plateOnlyMode, setPlateOnlyMode] = useState(false);
   const [cleanupMessage, setCleanupMessage] = useState("");
   const [stageAspect, setStageAspect] = useState(16 / 9);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -817,16 +867,19 @@ export default function Home() {
     const timer = window.setTimeout(() => { void composeResult(foregroundUrl, sequence); }, 140);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, wallStripEnabled, wallStrip, plateAction, encarCleanup]);
+  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, wallStripEnabled, wallStrip, plateAction, encarCleanup, plateOnlyMode]);
 
   async function composeImage(
     foreground: string,
     source: string,
     overlayPoints: PlatePoint[] = platePoints,
     overlayCoordinates: PlateCoordinates = plateCoordinates,
+    plateOnlyOverride: boolean = plateOnlyMode,
   ) {
     const [image, sourceImage] = await Promise.all([loadImage(foreground), loadImage(source)]);
-    const targetRatio = ratioValues[ratio] ?? image.width / image.height;
+    const targetRatio = plateOnlyOverride
+      ? sourceImage.width / sourceImage.height
+      : ratioValues[ratio] ?? image.width / image.height;
     const maxSide = 1800;
     let width = image.width;
     let height = Math.round(width / targetRatio);
@@ -848,7 +901,7 @@ export default function Home() {
     setDetectedScene("studio");
     const effectiveScene: SceneKind = "studio";
     const renderBackdrop: Backdrop = backdrop;
-    const preserveFloor = ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
+    const preserveFloor = plateOnlyOverride || (ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height);
     const replacementCanvas = document.createElement("canvas");
     replacementCanvas.width = width;
     replacementCanvas.height = height;
@@ -862,7 +915,7 @@ export default function Home() {
     if (preserveFloor) {
       const floorHorizon = estimateFloorHorizon(sourceImage, image);
       context.drawImage(sourceImage, 0, 0, width, height);
-      blendWallOnly(context, replacementCanvas, image, width, height, floorHorizon);
+      if (!plateOnlyOverride) blendWallOnly(context, replacementCanvas, image, width, height, floorHorizon);
     } else {
       context.drawImage(replacementCanvas, 0, 0);
     }
@@ -957,7 +1010,7 @@ export default function Home() {
 
     // 엔카 브랜딩 제거
     const cleanupMessages: string[] = [];
-    if (encarCleanup.stickerRemoval || encarCleanup.glassReflection) {
+    if (!plateOnlyOverride && (encarCleanup.stickerRemoval || encarCleanup.glassReflection)) {
       const maskCanvas = document.createElement("canvas");
       maskCanvas.width = width;
       maskCanvas.height = height;
@@ -967,16 +1020,9 @@ export default function Home() {
         const foregroundMaskData = maskContext.getImageData(0, 0, width, height).data;
 
         if (encarCleanup.stickerRemoval) {
-          const stickerCanvas = document.createElement("canvas");
-          stickerCanvas.width = width;
-          stickerCanvas.height = height;
-          const stickerContext = stickerCanvas.getContext("2d", { willReadFrequently: true });
-          if (stickerContext) {
-            stickerContext.drawImage(sourceImage, 0, 0, width, height);
-            const stickerResult = removeDisplayStickers(stickerContext, foregroundMaskData, width, height);
-            if (stickerResult.removed > 0 || stickerResult.uncertain > 0) {
-              cleanupMessages.push(stickerResult.message);
-            }
+          const stickerResult = removeDisplayStickers(context, foregroundMaskData, width, height);
+          if (stickerResult.removed > 0 || stickerResult.uncertain > 0) {
+            cleanupMessages.push(stickerResult.message);
           }
         }
 
@@ -1057,6 +1103,7 @@ export default function Home() {
     setPlateCoordinates("canvas");
     setPlateMode(false);
     setPlateStatus("idle");
+    setPlateOnlyMode(false);
     setPlateMessage("전면 번호판을 자동으로 찾거나 네 모서리를 직접 지정하세요.");
     setStatus("idle");
     setDetectedScene(null);
@@ -1070,13 +1117,17 @@ export default function Home() {
     setError("");
     setProgress(4);
     try {
-      const cutout = await removeVehicleBackground(sourceUrl, (value) => setProgress(Math.max(6, Math.min(90, Math.round(value * 0.9)))));
+      const sourceImage = await loadImage(sourceUrl);
+      const plateOnly = shouldProcessPlateOnly(sourceImage);
+      setPlateOnlyMode(plateOnly);
+      const cutout = plateOnly
+        ? await (await fetch(sourceUrl)).blob()
+        : await removeVehicleBackground(sourceUrl, (value) => setProgress(Math.max(6, Math.min(90, Math.round(value * 0.9)))));
       setProgress(94);
       try {
-        const sourceImage = await loadImage(sourceUrl);
         const detection = await detectFrontPlate(sourceImage);
         setPlateStatus(detection.points.length === 4 && detection.type !== "rear" ? "done" : "skipped");
-        setPlateMessage(detection.message);
+        setPlateMessage(`${plateOnly ? "배경 정돈 생략 · 번호판만 처리 · " : ""}${detection.message}`);
         setPlateCoordinates("source");
         setPlatePoints(detection.points.length === 4 && detection.type !== "rear"
           ? detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }))
@@ -1133,12 +1184,15 @@ export default function Home() {
         const file = batchFiles[index];
         const source = URL.createObjectURL(file);
         try {
-          const cutoutBlob = await removeVehicleBackground(source, (value) => {
-            setBatchProgress(Math.round(((index + value / 100) / batchFiles.length) * 100));
-          });
+          const sourceImage = await loadImage(source);
+          const plateOnly = shouldProcessPlateOnly(sourceImage);
+          const cutoutBlob = plateOnly
+            ? file
+            : await removeVehicleBackground(source, (value) => {
+                setBatchProgress(Math.round(((index + value / 100) / batchFiles.length) * 100));
+              });
           const cutoutUrl = URL.createObjectURL(cutoutBlob);
           try {
-            const sourceImage = await loadImage(source);
             let points: PlatePoint[] = [];
             let plate = "번호판 미적용";
             try {
@@ -1152,7 +1206,7 @@ export default function Home() {
             } catch {
               plate = "번호판 검출 오류 · 자동 합성 안 함 · 검수 필요";
             }
-            const composed = await composeImage(cutoutUrl, source, points, "source");
+            const composed = await composeImage(cutoutUrl, source, points, "source", plateOnly);
             const blob = composed.blob;
             completed.push({
               name: `${file.name.replace(/\.[^.]+$/, "")}-studio.jpg`,

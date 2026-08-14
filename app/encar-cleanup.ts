@@ -378,15 +378,7 @@ export function removeGlassReflections(
         continue;
       }
 
-      const glassColor = sampleGlassColor(pixels, width, height, pattern);
-      for (const pixelIdx of pattern.pixels) {
-        const po = pixelIdx * 4;
-        const blendStrength = 0.75;
-        pixels[po] = Math.round(pixels[po] * (1 - blendStrength) + glassColor.r * blendStrength);
-        pixels[po + 1] = Math.round(pixels[po + 1] * (1 - blendStrength) + glassColor.g * blendStrength);
-        pixels[po + 2] = Math.round(pixels[po + 2] * (1 - blendStrength) + glassColor.b * blendStrength);
-        pixels[po + 3] = foregroundMask[po + 3];
-      }
+      inpaintTextPattern(pixels, foregroundMask, width, height, pattern);
       removed++;
     }
   }
@@ -607,8 +599,67 @@ function isEncarBrandPattern(
   const patternWidth = pattern.maxX - pattern.minX + 1;
   const patternHeight = pattern.maxY - pattern.minY + 1;
   const aspect = patternWidth / Math.max(1, patternHeight);
+  const density = pattern.pixels.length / Math.max(1, patternWidth * patternHeight);
 
-  return (whiteRatio > 0.4 || brightRatio > 0.6) && aspect > 1.5;
+  return (whiteRatio > 0.58 || brightRatio > 0.76)
+    && aspect > 1.7 && aspect < 14
+    && density > 0.06 && density < 0.72
+    && patternHeight <= 90;
+}
+
+function inpaintTextPattern(
+  pixels: Uint8ClampedArray,
+  foregroundMask: Uint8ClampedArray,
+  width: number,
+  height: number,
+  pattern: TextPattern,
+) {
+  const original = new Uint8ClampedArray(pixels);
+  const targets = new Set<number>();
+  for (const pixel of pattern.pixels) {
+    const x = pixel % width;
+    const y = Math.floor(pixel / width);
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        const next = ny * width + nx;
+        if (foregroundMask[next * 4 + 3] > 96) targets.add(next);
+      }
+    }
+  }
+
+  const leftX = Math.max(0, pattern.minX - 4);
+  const rightX = Math.min(width - 1, pattern.maxX + 4);
+  const topY = Math.max(0, pattern.minY - 4);
+  const bottomY = Math.min(height - 1, pattern.maxY + 4);
+  const colorDistance = (a: number, b: number) => (
+    Math.abs(original[a] - original[b])
+    + Math.abs(original[a + 1] - original[b + 1])
+    + Math.abs(original[a + 2] - original[b + 2])
+  );
+
+  for (const pixel of targets) {
+    const x = pixel % width;
+    const y = Math.floor(pixel / width);
+    const offset = pixel * 4;
+    const left = (y * width + leftX) * 4;
+    const right = (y * width + rightX) * 4;
+    const top = (topY * width + x) * 4;
+    const bottom = (bottomY * width + x) * 4;
+    const horizontal = colorDistance(left, right) <= colorDistance(top, bottom);
+    const start = horizontal ? left : top;
+    const end = horizontal ? right : bottom;
+    const t = horizontal
+      ? (x - leftX) / Math.max(1, rightX - leftX)
+      : (y - topY) / Math.max(1, bottomY - topY);
+    const feather = pattern.pixels.includes(pixel) ? 0.84 : 0.48;
+    for (let channel = 0; channel < 3; channel += 1) {
+      const replacement = original[start + channel] * (1 - t) + original[end + channel] * t;
+      pixels[offset + channel] = Math.round(original[offset + channel] * (1 - feather) + replacement * feather);
+    }
+  }
 }
 
 function sampleGlassColor(

@@ -90,8 +90,8 @@ function isPlausiblePlateBox(plate: PlateBox, width: number, height: number) {
   const areaRatio = (plateWidth * plateHeight) / (width * height);
   const redDealer = plate.source === "red-dealer";
   // 측면/원근 사진에서 번호판 종횡비가 0.6~7.5까지 크게 왜곡될 수 있음
-  return aspectRatio >= (redDealer ? 0.35 : 0.6) && aspectRatio <= 7.5
-    && areaRatio >= (redDealer ? 0.0005 : 0.0015) && areaRatio <= (redDealer ? 0.08 : 0.04)
+  return aspectRatio >= 0.35 && aspectRatio <= 8.5
+    && areaRatio >= (redDealer ? 0.00035 : 0.0006) && areaRatio <= (redDealer ? 0.08 : 0.05)
     && plate.left >= width * 0.01 && plate.right <= width * 0.99
     && plate.top >= height * 0.15 && plate.bottom <= height * (redDealer ? 0.98 : 0.92);
 }
@@ -297,7 +297,7 @@ export async function detectFrontPlate(image: HTMLImageElement): Promise<PlateDe
   const redResult = findRedDealerPlate(image);
   if (redResult && isPlausiblePlateBox(redResult, image.naturalWidth, image.naturalHeight)) {
     const rearRatio = redLightRatio(image, redResult);
-    if (rearRatio >= 0.005) {
+    if (rearRatio >= 0.014) {
       return {
         type: "rear",
         points: boxPoints(redResult),
@@ -320,7 +320,7 @@ export async function detectFrontPlate(image: HTMLImageElement): Promise<PlateDe
     output = await session.run({ pixel_values: tensor });
     const modelResult = topPlateBox(output, image.naturalWidth, image.naturalHeight);
     const result = modelResult;
-    if (!result || result.score < 0.08) {
+    if (!result || result.score < 0.045) {
       return { type: "other", points: [], score: result?.score ?? null, message: "전면 번호판을 확실하게 찾지 못했습니다. 네 모서리를 직접 지정할 수 있습니다." };
     }
     if (!isPlausiblePlateBox(result, image.naturalWidth, image.naturalHeight)) {
@@ -328,10 +328,10 @@ export async function detectFrontPlate(image: HTMLImageElement): Promise<PlateDe
     }
     const rearRatio = redLightRatio(image, result);
     const points = boxPoints(result);
-    if (rearRatio >= 0.005) {
+    if (rearRatio >= 0.014) {
       return { type: "rear", points, score: result.score, message: "번호판 후보를 찾았습니다. 촬영 각도에 맞게 네 앵커를 확인해 주세요." };
     }
-    if (rearRatio > 0.002) {
+    if (rearRatio > 0.009) {
       return { type: "unknown", points, score: result.score, message: "비스듬한 번호판 후보를 찾았습니다. 네 앵커를 조정한 뒤 적용할 수 있습니다." };
     }
     return { type: "front", points, score: result.score, message: "번호판을 찾았습니다. 네 앵커를 드래그해 투시 각도를 조정할 수 있습니다." };
@@ -385,11 +385,21 @@ function bilinear([p0, p1, p2, p3]: PlatePoint[], u: number, v: number) {
 
 function paintTriangle(context: CanvasRenderingContext2D, source: HTMLCanvasElement, sourcePoints: PlatePoint[], destinationPoints: PlatePoint[]) {
   const transform = affineTransform(sourcePoints, destinationPoints);
+  const center = destinationPoints.reduce(
+    (sum, point) => ({ x: sum.x + point.x / 3, y: sum.y + point.y / 3 }),
+    { x: 0, y: 0 },
+  );
+  const clipPoints = destinationPoints.map((point) => {
+    const dx = point.x - center.x;
+    const dy = point.y - center.y;
+    const length = Math.hypot(dx, dy) || 1;
+    return { x: point.x + dx / length * 0.8, y: point.y + dy / length * 0.8 };
+  });
   context.save();
   context.beginPath();
-  context.moveTo(destinationPoints[0].x, destinationPoints[0].y);
-  context.lineTo(destinationPoints[1].x, destinationPoints[1].y);
-  context.lineTo(destinationPoints[2].x, destinationPoints[2].y);
+  context.moveTo(clipPoints[0].x, clipPoints[0].y);
+  context.lineTo(clipPoints[1].x, clipPoints[1].y);
+  context.lineTo(clipPoints[2].x, clipPoints[2].y);
   context.closePath();
   context.clip();
   context.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);

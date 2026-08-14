@@ -1,0 +1,21 @@
+{
+  "appId": "com.carstudio.ai",
+  "productName": "CarStudioAI",
+  "directories": {
+    "output": "dist-app"
+  },
+  "files": [
+    "dist/**/*",
+    "public/**/*",
+    "main-electron.cjs",
+    "package.json"
+  ],
+  "win": {
+    "target": "nsis"
+  },
+  "nsis": {
+    "oneClick": true,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": false
+  }
+}
