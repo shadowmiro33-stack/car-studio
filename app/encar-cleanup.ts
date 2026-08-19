@@ -378,7 +378,15 @@ export function removeGlassReflections(
         continue;
       }
 
-      inpaintTextPattern(pixels, foregroundMask, width, height, pattern);
+      const glassColor = sampleGlassColor(pixels, width, height, pattern);
+      for (const pixelIdx of pattern.pixels) {
+        const po = pixelIdx * 4;
+        const blendStrength = 0.75;
+        pixels[po] = Math.round(pixels[po] * (1 - blendStrength) + glassColor.r * blendStrength);
+        pixels[po + 1] = Math.round(pixels[po + 1] * (1 - blendStrength) + glassColor.g * blendStrength);
+        pixels[po + 2] = Math.round(pixels[po + 2] * (1 - blendStrength) + glassColor.b * blendStrength);
+        pixels[po + 3] = foregroundMask[po + 3];
+      }
       removed++;
     }
   }
@@ -599,67 +607,8 @@ function isEncarBrandPattern(
   const patternWidth = pattern.maxX - pattern.minX + 1;
   const patternHeight = pattern.maxY - pattern.minY + 1;
   const aspect = patternWidth / Math.max(1, patternHeight);
-  const density = pattern.pixels.length / Math.max(1, patternWidth * patternHeight);
 
-  return (whiteRatio > 0.58 || brightRatio > 0.76)
-    && aspect > 1.7 && aspect < 14
-    && density > 0.06 && density < 0.72
-    && patternHeight <= 90;
-}
-
-function inpaintTextPattern(
-  pixels: Uint8ClampedArray,
-  foregroundMask: Uint8ClampedArray,
-  width: number,
-  height: number,
-  pattern: TextPattern,
-) {
-  const original = new Uint8ClampedArray(pixels);
-  const targets = new Set<number>();
-  for (const pixel of pattern.pixels) {
-    const x = pixel % width;
-    const y = Math.floor(pixel / width);
-    for (let dy = -1; dy <= 1; dy += 1) {
-      for (let dx = -1; dx <= 1; dx += 1) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-        const next = ny * width + nx;
-        if (foregroundMask[next * 4 + 3] > 96) targets.add(next);
-      }
-    }
-  }
-
-  const leftX = Math.max(0, pattern.minX - 4);
-  const rightX = Math.min(width - 1, pattern.maxX + 4);
-  const topY = Math.max(0, pattern.minY - 4);
-  const bottomY = Math.min(height - 1, pattern.maxY + 4);
-  const colorDistance = (a: number, b: number) => (
-    Math.abs(original[a] - original[b])
-    + Math.abs(original[a + 1] - original[b + 1])
-    + Math.abs(original[a + 2] - original[b + 2])
-  );
-
-  for (const pixel of targets) {
-    const x = pixel % width;
-    const y = Math.floor(pixel / width);
-    const offset = pixel * 4;
-    const left = (y * width + leftX) * 4;
-    const right = (y * width + rightX) * 4;
-    const top = (topY * width + x) * 4;
-    const bottom = (bottomY * width + x) * 4;
-    const horizontal = colorDistance(left, right) <= colorDistance(top, bottom);
-    const start = horizontal ? left : top;
-    const end = horizontal ? right : bottom;
-    const t = horizontal
-      ? (x - leftX) / Math.max(1, rightX - leftX)
-      : (y - topY) / Math.max(1, bottomY - topY);
-    const feather = pattern.pixels.includes(pixel) ? 0.84 : 0.48;
-    for (let channel = 0; channel < 3; channel += 1) {
-      const replacement = original[start + channel] * (1 - t) + original[end + channel] * t;
-      pixels[offset + channel] = Math.round(original[offset + channel] * (1 - feather) + replacement * feather);
-    }
-  }
+  return (whiteRatio > 0.4 || brightRatio > 0.6) && aspect > 1.5;
 }
 
 function sampleGlassColor(
@@ -685,3 +634,59 @@ function sampleGlassColor(
   if (count === 0) return { r: 160, g: 160, b: 160 };
   return { r: Math.round(r / count), g: Math.round(g / count), b: Math.round(b / count) };
 }
+
+/**
+ * 차량 전경 알파 마스크 하단부에서 차량 외곽으로 돌출된
+ * 곡선 턴테이블 조각 및 바닥 경계선 얇은 잔여물을 감지하고 제거합니다.
+ */
+export function cleanTurntableArtifacts(
+  foregroundMask: Uint8ClampedArray,
+  width: number,
+  height: number,
+): void {
+  // 차량 하단 40% 영역 집중 탐지
+  const startY = Math.floor(height * 0.55);
+  const mask = new Uint8Array(width * height);
+  for (let i = 0; i < mask.length; i++) {
+    mask[i] = foregroundMask[i * 4 + 3] > 128 ? 1 : 0;
+  }
+
+  // 각 행별 전경 마스크 좌우 범위 계산
+  const rowLeft = new Int32Array(height).fill(-1);
+  const rowRight = new Int32Array(height).fill(-1);
+
+  for (let y = startY; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (mask[y * width + x]) {
+        if (rowLeft[y] === -1) rowLeft[y] = x;
+        rowRight[y] = x;
+      }
+    }
+  }
+
+  // 얇고 긴 바닥 턴테이블 곡선 조각 탐지 (두께 15px 이하이면서 좌우로 이어지는 스티치)
+  for (let y = startY; y < height - 5; y++) {
+    const left = rowLeft[y];
+    const right = rowRight[y];
+    if (left === -1 || right === -1) continue;
+
+    const rowWidth = right - left + 1;
+    // 얇은 고립 바닥 층 검사
+    let thickness = 0;
+    for (let ty = y; ty < Math.min(height, y + 20); ty++) {
+      if (mask[ty * width + Math.floor((left + right) / 2)]) thickness++;
+      else break;
+    }
+
+    if (thickness > 0 && thickness <= 12 && rowWidth > width * 0.4) {
+      // 턴테이블 테두리선 조각으로 판정 -> 해당 마스크 픽셀의 투명도(알파) 제거
+      for (let x = left; x <= right; x++) {
+        for (let cy = y; cy < y + thickness; cy++) {
+          const idx = (cy * width + x) * 4;
+          foregroundMask[idx + 3] = 0;
+        }
+      }
+    }
+  }
+}
+

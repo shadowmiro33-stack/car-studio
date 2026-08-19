@@ -2,7 +2,7 @@
 
 import { ChangeEvent, DragEvent, MouseEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { detectFrontPlate, drawPerspectivePlate, type PlateDetection, type PlatePoint } from "./plate-ai";
-import { blankPlateRegion, removeDisplayStickers, removeGlassReflections, type CleanupResult } from "./encar-cleanup";
+import { blankPlateRegion, cleanTurntableArtifacts, removeDisplayStickers, removeGlassReflections, type CleanupResult } from "./encar-cleanup";
 import JSZip from "jszip";
 
 type Backdrop = "studio" | "warm" | "graphite";
@@ -271,13 +271,10 @@ function largestAlphaComponent(pixels: Uint8ClampedArray, width: number, height:
       let solid = 0;
       for (let y = gy * step; y < Math.min(height, (gy + 1) * step); y += 1) {
         for (let x = gx * step; x < Math.min(width, (gx + 1) * step); x += 1) {
-          const idx = (y * width + x) * 4;
-          const alpha = pixels[idx + 3];
-          // 어두운 배경/검은 차체 사진 고려: 알파 120 이상이거나 반투명 영역 포함
-          if (alpha > 120) solid += 1;
+          if (pixels[(y * width + x) * 4 + 3] > 160) solid += 1;
         }
       }
-      if (solid >= Math.max(1, step * step * 0.22)) mask[gy * gridWidth + gx] = 1;
+      if (solid >= Math.max(1, step * step * 0.3)) mask[gy * gridWidth + gx] = 1;
     }
   }
   const visited = new Uint8Array(mask.length);
@@ -485,7 +482,7 @@ async function refineCutout(blob: Blob): Promise<Blob> {
     let maxY = 0;
     for (let y = 0; y < height; y += 3) {
       for (let x = 0; x < width; x += 3) {
-        if (original[(y * width + x) * 4 + 3] < 180) continue;
+        if (original[(y * width + x) * 4 + 3] < 210) continue;
         minX = Math.min(minX, x);
         maxX = Math.max(maxX, x);
         minY = Math.min(minY, y);
@@ -499,15 +496,11 @@ async function refineCutout(blob: Blob): Promise<Blob> {
     const cleanupTop = minY - subjectHeight * 0.12;
     const cleanupBottom = maxY + subjectHeight * 0.12;
 
-    // 모델이 만든 알파 매트를 보수적으로 정리한다. 차량 내부를 임의로
-    // 불투명하게 만들거나 하단을 형태 규칙으로 잘라내면 창문·휠·범퍼가
-    // 손상되므로, 가장 큰 연결 성분과 실제 알파 신뢰도만 사용한다.
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const offset = (y * width + x) * 4;
         const alpha = original[offset + 3];
         const componentIndex = Math.floor(y / component.step) * component.gridWidth + Math.floor(x / component.step);
-
         if (!component.keep[componentIndex]) {
           pixels[offset + 3] = 0;
           continue;
@@ -516,19 +509,15 @@ async function refineCutout(blob: Blob): Promise<Blob> {
           pixels[offset + 3] = 0;
           continue;
         }
-        if (alpha <= 18) {
+        if (alpha <= 20) {
           pixels[offset + 3] = 0;
           continue;
         }
-        if (alpha >= 244) {
-          pixels[offset + 3] = 255;
-          continue;
-        }
+        if (alpha >= 245) continue;
 
         let solidNeighbors = 0;
         let bestOffset = offset;
         let bestAlpha = alpha;
-        const neighborhoodAlpha: number[] = [];
         for (let dy = -2; dy <= 2; dy += 1) {
           const sampleY = y + dy;
           if (sampleY < 0 || sampleY >= height) continue;
@@ -537,28 +526,22 @@ async function refineCutout(blob: Blob): Promise<Blob> {
             if (sampleX < 0 || sampleX >= width) continue;
             const sampleOffset = (sampleY * width + sampleX) * 4;
             const sampleAlpha = original[sampleOffset + 3];
-            neighborhoodAlpha.push(sampleAlpha);
-            if (sampleAlpha > 128) solidNeighbors += 1;
+            if (sampleAlpha > 96) solidNeighbors += 1;
             if (sampleAlpha > bestAlpha) {
               bestAlpha = sampleAlpha;
               bestOffset = sampleOffset;
             }
           }
         }
-        if (solidNeighbors < 3) {
+        if (solidNeighbors < 5) {
           pixels[offset + 3] = 0;
           continue;
         }
 
-        neighborhoodAlpha.sort((a, b) => a - b);
-        const medianAlpha = neighborhoodAlpha[Math.floor(neighborhoodAlpha.length / 2)] ?? alpha;
-        // 낮은 알파의 벽색 프린지를 줄이되 얇은 안테나·미러·휠 스포크는
-        // 중앙값과 원본 알파 중 높은 값을 사용해 보존한다.
-        const matteAlpha = Math.max(alpha * 0.72, medianAlpha);
-        const normalized = Math.max(0, Math.min(1, (matteAlpha - 38) / 188));
+        const normalized = Math.max(0, Math.min(1, (alpha - 24) / 216));
         const smoothAlpha = normalized * normalized * (3 - 2 * normalized);
         pixels[offset + 3] = Math.round(smoothAlpha * 255);
-        const decontaminate = (1 - smoothAlpha) * Math.min(1, bestAlpha / 210) * 0.88;
+        const decontaminate = (1 - smoothAlpha) * Math.min(1, bestAlpha / 220) * 0.72;
         pixels[offset] = Math.round(original[offset] * (1 - decontaminate) + original[bestOffset] * decontaminate);
         pixels[offset + 1] = Math.round(original[offset + 1] * (1 - decontaminate) + original[bestOffset + 1] * decontaminate);
         pixels[offset + 2] = Math.round(original[offset + 2] * (1 - decontaminate) + original[bestOffset + 2] * decontaminate);
@@ -623,55 +606,6 @@ function restoreOriginalFloor(
   floorContext.fillRect(0, horizon - feather, width, height - horizon + feather);
   floorContext.globalCompositeOperation = "source-over";
   context.drawImage(floorCanvas, 0, 0);
-}
-
-function shouldProcessPlateOnly(image: HTMLImageElement) {
-  const width = 120;
-  const height = Math.max(60, Math.round(width * image.naturalHeight / image.naturalWidth));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) return false;
-  context.drawImage(image, 0, 0, width, height);
-  const pixels = context.getImageData(0, 0, width, height).data;
-  let samples = 0;
-  let transparent = 0;
-  let white = 0;
-  let neutral = 0;
-  let chromatic = 0;
-  let strongEdges = 0;
-
-  for (let y = 0; y < height * 0.62; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const borderSample = y < height * 0.28 || x < width * 0.13 || x > width * 0.87;
-      if (!borderSample) continue;
-      const offset = (y * width + x) * 4;
-      const alpha = pixels[offset + 3];
-      const r = pixels[offset];
-      const g = pixels[offset + 1];
-      const b = pixels[offset + 2];
-      const spread = Math.max(r, g, b) - Math.min(r, g, b);
-      samples += 1;
-      if (alpha < 32) transparent += 1;
-      if (r > 235 && g > 235 && b > 235 && spread < 20) white += 1;
-      if (spread < 24) neutral += 1;
-      if (spread > 55) chromatic += 1;
-      if (x > 0) {
-        const previous = offset - 4;
-        const difference = Math.abs(r - pixels[previous]) + Math.abs(g - pixels[previous + 1]) + Math.abs(b - pixels[previous + 2]);
-        if (difference > 150) strongEdges += 1;
-      }
-    }
-  }
-
-  if (!samples) return false;
-  if (transparent / samples > 0.04) return true;
-  const whiteRatio = white / samples;
-  const neutralRatio = neutral / samples;
-  const chromaticRatio = chromatic / samples;
-  const edgeRatio = strongEdges / samples;
-  return whiteRatio > 0.78 && neutralRatio > 0.9 && chromaticRatio < 0.04 && edgeRatio < 0.06;
 }
 
 function blendWallOnly(
@@ -835,7 +769,6 @@ export default function Home() {
   const [draggingWallStrip, setDraggingWallStrip] = useState(false);
   const [plateAction, setPlateAction] = useState<PlateAction>("replace");
   const [encarCleanup, setEncarCleanup] = useState<EncarCleanupOptions>({ stickerRemoval: true, glassReflection: true });
-  const [plateOnlyMode, setPlateOnlyMode] = useState(false);
   const [cleanupMessage, setCleanupMessage] = useState("");
   const [stageAspect, setStageAspect] = useState(16 / 9);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -867,19 +800,16 @@ export default function Home() {
     const timer = window.setTimeout(() => { void composeResult(foregroundUrl, sequence); }, 140);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, wallStripEnabled, wallStrip, plateAction, encarCleanup, plateOnlyMode]);
+  }, [foregroundUrl, backdrop, ratio, platePoints, plateCoordinates, wallStripEnabled, wallStrip, plateAction, encarCleanup]);
 
   async function composeImage(
     foreground: string,
     source: string,
     overlayPoints: PlatePoint[] = platePoints,
     overlayCoordinates: PlateCoordinates = plateCoordinates,
-    plateOnlyOverride: boolean = plateOnlyMode,
   ) {
     const [image, sourceImage] = await Promise.all([loadImage(foreground), loadImage(source)]);
-    const targetRatio = plateOnlyOverride
-      ? sourceImage.width / sourceImage.height
-      : ratioValues[ratio] ?? image.width / image.height;
+    const targetRatio = ratioValues[ratio] ?? image.width / image.height;
     const maxSide = 1800;
     let width = image.width;
     let height = Math.round(width / targetRatio);
@@ -901,7 +831,7 @@ export default function Home() {
     setDetectedScene("studio");
     const effectiveScene: SceneKind = "studio";
     const renderBackdrop: Backdrop = backdrop;
-    const preserveFloor = plateOnlyOverride || (ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height);
+    const preserveFloor = ratio === "original" && sourceImage.width === image.width && sourceImage.height === image.height;
     const replacementCanvas = document.createElement("canvas");
     replacementCanvas.width = width;
     replacementCanvas.height = height;
@@ -915,7 +845,7 @@ export default function Home() {
     if (preserveFloor) {
       const floorHorizon = estimateFloorHorizon(sourceImage, image);
       context.drawImage(sourceImage, 0, 0, width, height);
-      if (!plateOnlyOverride) blendWallOnly(context, replacementCanvas, image, width, height, floorHorizon);
+      blendWallOnly(context, replacementCanvas, image, width, height, floorHorizon);
     } else {
       context.drawImage(replacementCanvas, 0, 0);
     }
@@ -1010,7 +940,7 @@ export default function Home() {
 
     // 엔카 브랜딩 제거
     const cleanupMessages: string[] = [];
-    if (!plateOnlyOverride && (encarCleanup.stickerRemoval || encarCleanup.glassReflection)) {
+    if (encarCleanup.stickerRemoval || encarCleanup.glassReflection) {
       const maskCanvas = document.createElement("canvas");
       maskCanvas.width = width;
       maskCanvas.height = height;
@@ -1020,9 +950,16 @@ export default function Home() {
         const foregroundMaskData = maskContext.getImageData(0, 0, width, height).data;
 
         if (encarCleanup.stickerRemoval) {
-          const stickerResult = removeDisplayStickers(context, foregroundMaskData, width, height);
-          if (stickerResult.removed > 0 || stickerResult.uncertain > 0) {
-            cleanupMessages.push(stickerResult.message);
+          const stickerCanvas = document.createElement("canvas");
+          stickerCanvas.width = width;
+          stickerCanvas.height = height;
+          const stickerContext = stickerCanvas.getContext("2d", { willReadFrequently: true });
+          if (stickerContext) {
+            stickerContext.drawImage(sourceImage, 0, 0, width, height);
+            const stickerResult = removeDisplayStickers(stickerContext, foregroundMaskData, width, height);
+            if (stickerResult.removed > 0 || stickerResult.uncertain > 0) {
+              cleanupMessages.push(stickerResult.message);
+            }
           }
         }
 
@@ -1103,7 +1040,6 @@ export default function Home() {
     setPlateCoordinates("canvas");
     setPlateMode(false);
     setPlateStatus("idle");
-    setPlateOnlyMode(false);
     setPlateMessage("전면 번호판을 자동으로 찾거나 네 모서리를 직접 지정하세요.");
     setStatus("idle");
     setDetectedScene(null);
@@ -1117,17 +1053,13 @@ export default function Home() {
     setError("");
     setProgress(4);
     try {
-      const sourceImage = await loadImage(sourceUrl);
-      const plateOnly = shouldProcessPlateOnly(sourceImage);
-      setPlateOnlyMode(plateOnly);
-      const cutout = plateOnly
-        ? await (await fetch(sourceUrl)).blob()
-        : await removeVehicleBackground(sourceUrl, (value) => setProgress(Math.max(6, Math.min(90, Math.round(value * 0.9)))));
+      const cutout = await removeVehicleBackground(sourceUrl, (value) => setProgress(Math.max(6, Math.min(90, Math.round(value * 0.9)))));
       setProgress(94);
       try {
+        const sourceImage = await loadImage(sourceUrl);
         const detection = await detectFrontPlate(sourceImage);
         setPlateStatus(detection.points.length === 4 && detection.type !== "rear" ? "done" : "skipped");
-        setPlateMessage(`${plateOnly ? "배경 정돈 생략 · 번호판만 처리 · " : ""}${detection.message}`);
+        setPlateMessage(detection.message);
         setPlateCoordinates("source");
         setPlatePoints(detection.points.length === 4 && detection.type !== "rear"
           ? detection.points.map((point) => ({ x: point.x / sourceImage.naturalWidth, y: point.y / sourceImage.naturalHeight }))
@@ -1184,15 +1116,12 @@ export default function Home() {
         const file = batchFiles[index];
         const source = URL.createObjectURL(file);
         try {
-          const sourceImage = await loadImage(source);
-          const plateOnly = shouldProcessPlateOnly(sourceImage);
-          const cutoutBlob = plateOnly
-            ? file
-            : await removeVehicleBackground(source, (value) => {
-                setBatchProgress(Math.round(((index + value / 100) / batchFiles.length) * 100));
-              });
+          const cutoutBlob = await removeVehicleBackground(source, (value) => {
+            setBatchProgress(Math.round(((index + value / 100) / batchFiles.length) * 100));
+          });
           const cutoutUrl = URL.createObjectURL(cutoutBlob);
           try {
+            const sourceImage = await loadImage(source);
             let points: PlatePoint[] = [];
             let plate = "번호판 미적용";
             try {
@@ -1206,7 +1135,7 @@ export default function Home() {
             } catch {
               plate = "번호판 검출 오류 · 자동 합성 안 함 · 검수 필요";
             }
-            const composed = await composeImage(cutoutUrl, source, points, "source", plateOnly);
+            const composed = await composeImage(cutoutUrl, source, points, "source");
             const blob = composed.blob;
             completed.push({
               name: `${file.name.replace(/\.[^.]+$/, "")}-studio.jpg`,

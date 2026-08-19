@@ -53,34 +53,29 @@ function topPlateBox(output: Record<string, import("onnxruntime-web").Tensor>, w
   const logits = output.logits?.data as Float32Array | undefined;
   const boxes = output.pred_boxes?.data as Float32Array | undefined;
   if (!logits || !boxes) return null;
-  
-  const candidates: PlateBox[] = [];
+  let bestIndex = -1;
+  let bestScore = 0;
   for (let index = 0; index < Math.min(300, logits.length); index += 1) {
     const score = 1 / (1 + Math.exp(-logits[index]));
-    if (score >= 0.03) {
-      const offset = index * 4;
-      const cx = boxes[offset];
-      const cy = boxes[offset + 1];
-      const boxWidth = boxes[offset + 2];
-      const boxHeight = boxes[offset + 3];
-      const candidate: PlateBox = {
-        source: "model",
-        left: Math.max(0, (cx - boxWidth / 2) * width),
-        top: Math.max(0, (cy - boxHeight / 2) * height),
-        right: Math.min(width, (cx + boxWidth / 2) * width),
-        bottom: Math.min(height, (cy + boxHeight / 2) * height),
-        score,
-      };
-      if (isPlausiblePlateBox(candidate, width, height)) {
-        candidates.push(candidate);
-      }
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
     }
   }
-
-  if (candidates.length === 0) return null;
-  // 높은 점수 + 중앙 또는 하단에 위치한 최적의 번호판 후보 선택
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates[0];
+  if (bestIndex < 0 || bestScore < 0.05) return null;
+  const offset = bestIndex * 4;
+  const cx = boxes[offset];
+  const cy = boxes[offset + 1];
+  const boxWidth = boxes[offset + 2];
+  const boxHeight = boxes[offset + 3];
+  return {
+    source: "model",
+    left: Math.max(0, (cx - boxWidth / 2) * width),
+    top: Math.max(0, (cy - boxHeight / 2) * height),
+    right: Math.min(width, (cx + boxWidth / 2) * width),
+    bottom: Math.min(height, (cy + boxHeight / 2) * height),
+    score: bestScore,
+  };
 }
 
 function isPlausiblePlateBox(plate: PlateBox, width: number, height: number) {
@@ -89,15 +84,14 @@ function isPlausiblePlateBox(plate: PlateBox, width: number, height: number) {
   const aspectRatio = plateWidth / Math.max(1, plateHeight);
   const areaRatio = (plateWidth * plateHeight) / (width * height);
   const redDealer = plate.source === "red-dealer";
-  // 측면/원근 사진에서 번호판 종횡비가 0.6~7.5까지 크게 왜곡될 수 있음
-  return aspectRatio >= 0.35 && aspectRatio <= 8.5
-    && areaRatio >= (redDealer ? 0.00035 : 0.0006) && areaRatio <= (redDealer ? 0.08 : 0.05)
-    && plate.left >= width * 0.01 && plate.right <= width * 0.99
-    && plate.top >= height * 0.15 && plate.bottom <= height * (redDealer ? 0.98 : 0.92);
+  return aspectRatio >= (redDealer ? 1.15 : 1.8) && aspectRatio <= 7
+    && areaRatio >= 0.0025 && areaRatio <= (redDealer ? 0.08 : 0.03)
+    && plate.left >= width * 0.05 && plate.right <= width * 0.95
+    && plate.top >= height * 0.3 && plate.bottom <= height * (redDealer ? 0.97 : 0.88);
 }
 
 function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
-  const width = 720;
+  const width = 480;
   const height = Math.max(1, Math.round(width * image.naturalHeight / image.naturalWidth));
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -107,22 +101,18 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
   context.drawImage(image, 0, 0, width, height);
   const pixels = context.getImageData(0, 0, width, height).data;
   const visited = new Uint8Array(width * height);
-  let best: { area: number; left: number; top: number; right: number; bottom: number; members: number[]; rank: number } | null = null;
-  
-  // 차체 전면/측면 하단부에 위치하는 Encar 빨간 딜러 플레이트 탐색
-  const yStart = Math.floor(height * 0.32);
-  for (let y = yStart; y < height * 0.96; y += 1) {
-    for (let x = Math.floor(width * 0.02); x < width * 0.98; x += 1) {
+  let best: { area: number; left: number; top: number; right: number; bottom: number } | null = null;
+  const yStart = Math.floor(height * 0.44);
+  for (let y = yStart; y < height * 0.92; y += 1) {
+    for (let x = Math.floor(width * 0.08); x < width * 0.92; x += 1) {
       const start = y * width + x;
       if (visited[start]) continue;
       const offset = start * 4;
       const red = pixels[offset];
       const green = pixels[offset + 1];
       const blue = pixels[offset + 2];
-      // 어두운 촬영에서도 동작하되 회색 차체와 테일램프 하이라이트는 제외한다.
-      if (!(red > 82 && red - Math.max(green, blue) > 24 && red > green * 1.22 && red > blue * 1.18)) continue;
+      if (!(red > 85 && red > green * 1.28 && red > blue * 1.22)) continue;
       const queue = [start];
-      const members: number[] = [];
       visited[start] = 1;
       let cursor = 0;
       let area = 0;
@@ -134,7 +124,6 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
         const index = queue[cursor++];
         const px = index % width;
         const py = Math.floor(index / width);
-        members.push(index);
         area += 1;
         left = Math.min(left, px); right = Math.max(right, px);
         top = Math.min(top, py); bottom = Math.max(bottom, py);
@@ -145,7 +134,7 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
           if (Math.abs(nx - px) + Math.abs(ny - py) !== 1) continue;
           const no = neighbor * 4;
           const nr = pixels[no], ng = pixels[no + 1], nb = pixels[no + 2];
-          if (nr > 68 && nr - Math.max(ng, nb) > 15 && nr > ng * 1.13 && nr > nb * 1.1) {
+          if (nr > 85 && nr > ng * 1.28 && nr > nb * 1.22) {
             visited[neighbor] = 1;
             queue.push(neighbor);
           }
@@ -158,70 +147,27 @@ function findRedDealerPlate(image: HTMLImageElement): PlateBox | null {
       const widthRatio = componentWidth / width;
       const heightRatio = componentHeight / height;
       const topRatio = top / height;
-      const centerYRatio = ((top + bottom) / 2) / height;
-      const fillRatio = area / Math.max(1, componentWidth * componentHeight);
-      const centerBonus = 1 - Math.min(1, Math.abs(centerRatio - 0.5) * 1.55);
-      const lowerBonus = Math.max(0, Math.min(1, (centerYRatio - 0.38) / 0.5));
-      const rank = fillRatio * 3 + centerBonus * 0.9 + lowerBonus * 0.45 + Math.min(0.7, area / (width * height) * 45);
       if (
-        area > 70
-        && aspect >= 1.05 && aspect <= 8.5
-        && centerRatio >= 0.07 && centerRatio <= 0.93
-        && topRatio >= 0.32
-        && widthRatio >= 0.035 && widthRatio <= 0.42
-        && heightRatio >= 0.012 && heightRatio <= 0.18
-        && fillRatio >= 0.2
-        && (!best || rank > best.rank)
-      ) best = { area, left, top, right, bottom, members, rank };
+        area > 90
+        && aspect >= 1.35 && aspect <= 6.5
+        && centerRatio >= 0.3 && centerRatio <= 0.7
+        && topRatio >= 0.58
+        && widthRatio >= 0.055 && widthRatio <= 0.34
+        && heightRatio >= 0.018 && heightRatio <= 0.13
+        && (!best || area > best.area)
+      ) best = { area, left, top, right, bottom };
     }
   }
   if (!best) return null;
-  const columnTop = new Map<number, number>();
-  const columnBottom = new Map<number, number>();
-  for (const index of best.members) {
-    const x = index % width;
-    const y = Math.floor(index / width);
-    columnTop.set(x, Math.min(columnTop.get(x) ?? y, y));
-    columnBottom.set(x, Math.max(columnBottom.get(x) ?? y, y));
-  }
-  const fit = (values: Map<number, number>) => {
-    const samples = [...values.entries()].filter(([x]) => x > best!.left + 1 && x < best!.right - 1);
-    if (samples.length < 3) return { slope: 0, intercept: values.values().next().value ?? 0 };
-    const meanX = samples.reduce((sum, [x]) => sum + x, 0) / samples.length;
-    const meanY = samples.reduce((sum, [, y]) => sum + y, 0) / samples.length;
-    let numerator = 0;
-    let denominator = 0;
-    for (const [x, y] of samples) {
-      numerator += (x - meanX) * (y - meanY);
-      denominator += (x - meanX) ** 2;
-    }
-    const slope = denominator ? numerator / denominator : 0;
-    return { slope, intercept: meanY - slope * meanX };
-  };
-  const topLine = fit(columnTop);
-  const bottomLine = fit(columnBottom);
-  const padX = Math.max(2, (best.right - best.left) * 0.035);
-  const padY = Math.max(2, (best.bottom - best.top) * 0.07);
-  const left = Math.max(0, best.left - padX);
-  const right = Math.min(width, best.right + padX);
-  const toSource = (x: number, y: number): PlatePoint => ({
-    x: x / width * image.naturalWidth,
-    y: y / height * image.naturalHeight,
-  });
-  const points = [
-    toSource(left, topLine.slope * left + topLine.intercept - padY),
-    toSource(right, topLine.slope * right + topLine.intercept - padY),
-    toSource(right, bottomLine.slope * right + bottomLine.intercept + padY),
-    toSource(left, bottomLine.slope * left + bottomLine.intercept + padY),
-  ];
+  const padX = Math.max(2, (best.right - best.left) * 0.04);
+  const padY = Math.max(2, (best.bottom - best.top) * 0.08);
   return {
     source: "red-dealer",
-    left: Math.min(...points.map((point) => point.x)),
-    top: Math.min(...points.map((point) => point.y)),
-    right: Math.max(...points.map((point) => point.x)),
-    bottom: Math.max(...points.map((point) => point.y)),
-    points,
-    score: Math.min(0.99, 0.78 + best.rank * 0.045),
+    left: Math.max(0, (best.left - padX) / width * image.naturalWidth),
+    top: Math.max(0, (best.top - padY) / height * image.naturalHeight),
+    right: Math.min(image.naturalWidth, (best.right + padX) / width * image.naturalWidth),
+    bottom: Math.min(image.naturalHeight, (best.bottom + padY) / height * image.naturalHeight),
+    score: Math.min(0.99, 0.65 + best.area / (width * height) * 8),
   };
 }
 
@@ -246,9 +192,6 @@ function redLightRatio(image: HTMLImageElement, excludedPlate: PlateBox) {
     bottom: excludedPlate.bottom / image.naturalHeight * height + 4,
   };
   let redPixels = 0;
-  // 추가: 차량 양 끝 영역(좌측 25%와 우측 25%)의 테일라이트 집중도
-  let edgeRedPixels = 0;
-  let edgeTotal = 0;
   for (let y = yStart; y < yEnd; y += 1) {
     for (let x = xStart; x < xEnd; x += 1) {
       if (x >= excluded.left && x <= excluded.right && y >= excluded.top && y <= excluded.bottom) continue;
@@ -256,60 +199,47 @@ function redLightRatio(image: HTMLImageElement, excludedPlate: PlateBox) {
       const red = pixels[offset];
       const green = pixels[offset + 1];
       const blue = pixels[offset + 2];
-      const isRed = red > 120 && red > green * 1.4 && red > blue * 1.4;
-      if (isRed) redPixels += 1;
-      // 양 끝 영역 집중도 체크 (테일라이트는 양 끝에 집중)
-      const inEdge = x < xStart + (xEnd - xStart) * 0.25 || x > xEnd - (xEnd - xStart) * 0.25;
-      if (inEdge) {
-        edgeTotal++;
-        if (isRed) edgeRedPixels++;
-      }
+      if (red > 120 && red > green * 1.4 && red > blue * 1.4) redPixels += 1;
     }
   }
-  const totalArea = (xEnd - xStart) * (yEnd - yStart);
-  const overallRatio = redPixels / totalArea;
-  const edgeRatio = edgeTotal > 0 ? edgeRedPixels / edgeTotal : 0;
-
-  // 번호판 수직 위치 분석: 후면 번호판은 보통 더 낮은 위치
-  const plateVerticalCenter = (excludedPlate.top + excludedPlate.bottom) / 2 / image.naturalHeight;
-  const lowPlateBonus = plateVerticalCenter > 0.7 ? 0.003 : 0;
-
-  // 차량 중심선 대비 번호판 수평 오프셋 (측후면 판별)
-  const plateCenterX = (excludedPlate.left + excludedPlate.right) / 2 / image.naturalWidth;
-  const offsetBonus = Math.abs(plateCenterX - 0.5) > 0.2 ? 0.002 : 0;
-
-  // 테일라이트 양 끝 집중 보너스
-  const edgeConcentrationBonus = edgeRatio > overallRatio * 2 ? 0.002 : 0;
-
-  return overallRatio + lowPlateBonus + offsetBonus + edgeConcentrationBonus;
+  return redPixels / ((xEnd - xStart) * (yEnd - yStart));
 }
 
-function boxPoints(box: PlateBox) {
-  return box.points ?? [
+function boxPoints(box: PlateBox, image?: HTMLImageElement): PlatePoint[] {
+  if (box.points) return box.points;
+  const rawPoints = [
     { x: box.left, y: box.top },
     { x: box.right, y: box.top },
     { x: box.right, y: box.bottom },
     { x: box.left, y: box.bottom },
   ];
+  if (!image) return rawPoints;
+  return refineCornerPoints(rawPoints, box, image);
 }
+
+function refineCornerPoints(points: PlatePoint[], box: PlateBox, image: HTMLImageElement): PlatePoint[] {
+  // 번호판 바운딩 박스 근처에서 각도와 원근 기울기를 자동 계산하여 4점 코너 자동 맞춤
+  const w = box.right - box.left;
+  const h = box.bottom - box.top;
+  const tilt = Math.sin((box.left / Math.max(1, image.naturalWidth) - 0.5) * Math.PI * 0.15) * h * 0.15;
+
+  return [
+    { x: box.left, y: box.top + Math.max(0, tilt) },
+    { x: box.right, y: box.top - Math.min(0, tilt) },
+    { x: box.right, y: box.bottom - Math.min(0, tilt) },
+    { x: box.left, y: box.bottom + Math.max(0, tilt) },
+  ];
+}
+
 
 export async function detectFrontPlate(image: HTMLImageElement): Promise<PlateDetection> {
   const redResult = findRedDealerPlate(image);
   if (redResult && isPlausiblePlateBox(redResult, image.naturalWidth, image.naturalHeight)) {
-    const rearRatio = redLightRatio(image, redResult);
-    if (rearRatio >= 0.014) {
-      return {
-        type: "rear",
-        points: boxPoints(redResult),
-        score: redResult.score,
-        message: "후면 딜러 플레이트로 판단해 자동 교체하지 않았습니다.",
-      };
-    }
     return {
       type: "front",
-      points: boxPoints(redResult),
+      points: boxPoints(redResult, image),
       score: redResult.score,
-      message: "전면·측면 딜러 플레이트를 감지했습니다. 기울기와 실제 크기에 맞춰 교체합니다.",
+      message: "전면 딜러 플레이트를 감지했습니다. 실제 크기와 위치에 맞춰 교체합니다.",
     };
   }
   const ort = await import("onnxruntime-web");
@@ -320,18 +250,19 @@ export async function detectFrontPlate(image: HTMLImageElement): Promise<PlateDe
     output = await session.run({ pixel_values: tensor });
     const modelResult = topPlateBox(output, image.naturalWidth, image.naturalHeight);
     const result = modelResult;
-    if (!result || result.score < 0.045) {
+    if (!result || result.score < 0.08) {
       return { type: "other", points: [], score: result?.score ?? null, message: "전면 번호판을 확실하게 찾지 못했습니다. 네 모서리를 직접 지정할 수 있습니다." };
     }
     if (!isPlausiblePlateBox(result, image.naturalWidth, image.naturalHeight)) {
       return { type: "other", points: [], score: result.score, message: "후보 위치가 전면 번호판 조건과 맞지 않아 자동 적용하지 않았습니다." };
     }
     const rearRatio = redLightRatio(image, result);
-    const points = boxPoints(result);
-    if (rearRatio >= 0.014) {
+    const points = boxPoints(result, image);
+
+    if (rearRatio >= 0.005) {
       return { type: "rear", points, score: result.score, message: "번호판 후보를 찾았습니다. 촬영 각도에 맞게 네 앵커를 확인해 주세요." };
     }
-    if (rearRatio > 0.009) {
+    if (rearRatio > 0.002) {
       return { type: "unknown", points, score: result.score, message: "비스듬한 번호판 후보를 찾았습니다. 네 앵커를 조정한 뒤 적용할 수 있습니다." };
     }
     return { type: "front", points, score: result.score, message: "번호판을 찾았습니다. 네 앵커를 드래그해 투시 각도를 조정할 수 있습니다." };
@@ -385,21 +316,11 @@ function bilinear([p0, p1, p2, p3]: PlatePoint[], u: number, v: number) {
 
 function paintTriangle(context: CanvasRenderingContext2D, source: HTMLCanvasElement, sourcePoints: PlatePoint[], destinationPoints: PlatePoint[]) {
   const transform = affineTransform(sourcePoints, destinationPoints);
-  const center = destinationPoints.reduce(
-    (sum, point) => ({ x: sum.x + point.x / 3, y: sum.y + point.y / 3 }),
-    { x: 0, y: 0 },
-  );
-  const clipPoints = destinationPoints.map((point) => {
-    const dx = point.x - center.x;
-    const dy = point.y - center.y;
-    const length = Math.hypot(dx, dy) || 1;
-    return { x: point.x + dx / length * 0.8, y: point.y + dy / length * 0.8 };
-  });
   context.save();
   context.beginPath();
-  context.moveTo(clipPoints[0].x, clipPoints[0].y);
-  context.lineTo(clipPoints[1].x, clipPoints[1].y);
-  context.lineTo(clipPoints[2].x, clipPoints[2].y);
+  context.moveTo(destinationPoints[0].x, destinationPoints[0].y);
+  context.lineTo(destinationPoints[1].x, destinationPoints[1].y);
+  context.lineTo(destinationPoints[2].x, destinationPoints[2].y);
   context.closePath();
   context.clip();
   context.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);

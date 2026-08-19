@@ -38,3 +38,10 @@ yarn-error.log*
 /.wrangler/
 /outputs/
 /work/
+
+# Temp build outputs & logs
+.tmp-*
+dist-app/
+*.log
+*.bak
+
