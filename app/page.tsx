@@ -538,10 +538,14 @@ async function refineCutout(blob: Blob): Promise<Blob> {
           continue;
         }
 
+        // 어두운 차종 윤곽 미세 경계 스무딩 (Dark vehicle edge smoothing)
+        const isDarkVehicle = (original[offset] * 0.2126 + original[offset + 1] * 0.7152 + original[offset + 2] * 0.0722) < 85;
         const normalized = Math.max(0, Math.min(1, (alpha - 24) / 216));
         const smoothAlpha = normalized * normalized * (3 - 2 * normalized);
         pixels[offset + 3] = Math.round(smoothAlpha * 255);
-        const decontaminate = (1 - smoothAlpha) * Math.min(1, bestAlpha / 220) * 0.72;
+
+        const factor = isDarkVehicle ? 0.85 : 0.72;
+        const decontaminate = (1 - smoothAlpha) * Math.min(1, bestAlpha / 220) * factor;
         pixels[offset] = Math.round(original[offset] * (1 - decontaminate) + original[bestOffset] * decontaminate);
         pixels[offset + 1] = Math.round(original[offset + 1] * (1 - decontaminate) + original[bestOffset + 1] * decontaminate);
         pixels[offset + 2] = Math.round(original[offset + 2] * (1 - decontaminate) + original[bestOffset + 2] * decontaminate);
@@ -1496,10 +1500,25 @@ export default function Home() {
                   <div className="batch-card-meta">
                     <strong>{file.name}</strong>
                     <div className="batch-card-status-col">
-                      {result?.plate.includes("검수 필요") && <span className="review-badge">검수 필요</span>}
+                      {result?.plate.includes("검수 필요") && <span className="review-badge warning">⚠️ 검수 필요</span>}
                       <small>{result?.plate ?? "원본 준비됨"}</small>
                     </div>
-                    {result && <button onClick={() => setDetailIndex(index)}>상세보기</button>}
+                    {result && (
+                      <div style={{ display: 'flex', gap: '4px' }}>
+                        <button onClick={() => setDetailIndex(index)}>상세보기</button>
+                        {result.plate.includes("검수 필요") && (
+                          <button
+                            style={{ background: '#292c2e', color: '#fff', border: 'none' }}
+                            onClick={() => {
+                              const batchFile = batchFiles[index];
+                              if (batchFile) handleFileSelect(batchFile);
+                            }}
+                          >
+                            수동 4점 보정
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </article>
               );
