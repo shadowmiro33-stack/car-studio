@@ -262,24 +262,18 @@ function drawProjectedShadow(
 }
 
 function largestAlphaComponent(pixels: Uint8ClampedArray, width: number, height: number) {
-  const step = Math.max(1, Math.ceil(Math.max(width, height) / 620));
-  const gridWidth = Math.ceil(width / step);
-  const gridHeight = Math.ceil(height / step);
-  const mask = new Uint8Array(gridWidth * gridHeight);
-  for (let gy = 0; gy < gridHeight; gy += 1) {
-    for (let gx = 0; gx < gridWidth; gx += 1) {
-      let solid = 0;
-      for (let y = gy * step; y < Math.min(height, (gy + 1) * step); y += 1) {
-        for (let x = gx * step; x < Math.min(width, (gx + 1) * step); x += 1) {
-          if (pixels[(y * width + x) * 4 + 3] > 160) solid += 1;
-        }
-      }
-      if (solid >= Math.max(1, step * step * 0.3)) mask[gy * gridWidth + gx] = 1;
-    }
+  // 계단 현상(Staircasing) 원인 방지를 위한 1:1 픽셀 고해상도 매핑
+  const step = 1;
+  const gridWidth = width;
+  const gridHeight = height;
+  const mask = new Uint8Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    if (pixels[i * 4 + 3] > 100) mask[i] = 1;
   }
+
   const visited = new Uint8Array(mask.length);
   let largest: number[] = [];
-  for (let start = 0; start < mask.length; start += 1) {
+  for (let start = 0; start < mask.length; start += 5) {
     if (!mask[start] || visited[start]) continue;
     const queue = [start];
     const component: number[] = [];
